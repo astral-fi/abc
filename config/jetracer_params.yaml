@@ -1,0 +1,63 @@
+# jetracer_params.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Convenience reference for all tunable parameters in the JetRacer
+# teach-repeat stack.  Values here document the defaults set in the launch
+# files.  Load with:  rosparam load jetracer_params.yaml
+# or reference individual entries from your launch file with:
+#   <rosparam file="$(find abc)/config/jetracer_params.yaml"/>
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Global teach_repeat parameters ────────────────────────────────────────────
+data_save_dir: "~/jetracer/teach_runs"
+data_load_dir: "~/jetracer/teach_runs"
+image_resize_width: 115
+image_resize_height: 44
+patch_size: [9, 9]
+goal_pose_separation: 0.3          # metres — must match distance_threshold
+image_field_of_view_width_deg: 160.0  # EDIT: match your lens
+
+# ── data_collect.py ────────────────────────────────────────────────────────────
+data_collect:
+  distance_threshold:  0.3         # metres between waypoints
+  angle_threshold_deg: 12.0        # degrees of rotation between waypoints
+
+# ── localiser.py ───────────────────────────────────────────────────────────────
+localiser:
+  rotation_correction_gain: 0.01
+  path_correction_gain:     0.01
+  stop_at_end:              true
+  discrete_correction:      true   # reduce CPU on Jetson Nano
+  search_range:             1
+  global_localisation_init: false
+  min_init_correlation:     0.0
+
+# ── jetracer_drive_to_pose_controller.py ──────────────────────────────────────
+controller:
+  lookahead_distance:   0.40       # metres — PRIMARY tuning knob
+  cruise_speed:         0.35       # m/s
+  min_speed:            0.15       # m/s — Ackermann floor
+  slow_down_dist:       0.35       # metres
+  goal_threshold:       0.20       # metres
+  wheelbase:            0.16       # metres — EDIT to your robot's actual value
+  max_steer_angle_deg:  28.0       # degrees — EDIT to your servo's travel
+  behind_threshold_deg: 90.0       # degrees
+
+# ── cmd_vel_to_jetracer.py ────────────────────────────────────────────────────
+hardware_bridge:
+  steering_channel: 0
+  throttle_channel: 1
+  steering_mid_deg: 90
+  steering_range_deg: 28
+  max_linear_ms: 0.5
+
+# ── Teleop (teach phase) ──────────────────────────────────────────────────────
+teleop:
+  joy_device:          "/dev/input/js0"
+  enable_button:       5            # RB on Xbox / Logitech F710
+  enable_turbo_button: 4            # LB
+  axis_linear:         1            # left stick vertical
+  axis_angular:        3            # right stick horizontal
+  scale_linear:        0.35
+  scale_angular:       0.8
+  scale_linear_turbo:  0.55
+  scale_angular_turbo: 1.2

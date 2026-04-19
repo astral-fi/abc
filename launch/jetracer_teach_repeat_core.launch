@@ -1,0 +1,117 @@
+<?xml version="1.0"?>
+<!--
+  jetracer_teach_repeat_core.launch
+  ─────────────────────────────────────────────────────────────────────────────
+  Shared base for both teach and repeat phases.
+
+  WHAT THIS FILE DOES
+  ─────────────────────────────────────────────────────────────────────────────
+  1. Sets all global ROS parameters consumed by QVPR/teach-repeat nodes.
+  2. Launches odom_integrator — converts /odom_raw (raw encoder velocities)
+     into /odom (integrated x, y, yaw pose) that teach-repeat requires.
+
+  ASSUMED RUNNING BEFORE THIS FILE IS INCLUDED
+  ─────────────────────────────────────────────────────────────────────────────
+  Your base JetRacer hardware stack (separate terminals):
+    roslaunch jetracer jetracer.launch      → publishes /odom_raw, /cmd_vel sink
+    roslaunch jetracer csi_camera.launch    → publishes /camera/image_raw
+    roslaunch jetracer joy                  → joy + teleop (cmd_vel) already active
+
+  TOPIC MAP (what teach-repeat nodes will see)
+  ─────────────────────────────────────────────────────────────────────────────
+    Camera    : /camera/image_raw    (from csi_camera.launch)
+    Odometry  : /odom                (created HERE by odom_integrator)
+    Drive cmd : /cmd_vel             (already running; controller writes to it)
+
+  BEFORE FIRST USE — edit values marked "EDIT ME":
+    • /data_save_dir / /data_load_dir  → where teach-run folders live on disk
+    • /image_field_of_view_width_deg   → your camera lens FOV in degrees
+      Standard IMX219 (RPi v2 module):   62.2 °
+      Wide-angle IMX219 (160° variant): 160.0 °
+      Waveshare IMX219-83 (83°):         83.0 °
+-->
+<launch>
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       ODOMETRY BRIDGE
+       Converts /odom_raw (velocity only, no integrated pose) into /odom
+       (full nav_msgs/Odometry with integrated x, y, yaw).
+
+       This is the fix for the "I only have /odom_raw" gap.  The JetRacer
+       jetracer.launch publishes encoder velocities on /odom_raw but does NOT
+       integrate them into a pose.  odom_integrator.py does that integration
+       using a standard unicycle dead-reckoning model.
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       DATA DIRECTORIES
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    Parent directory for teach-run data folders.
+    data_save.py writes timestamped sub-folders here during teach.
+    localiser.py reads the most-recent sub-folder during repeat.
+    EDIT ME: change if your home directory path differs.
+  -->
+  <param name="/data_save_dir" value="$(env HOME)/jetracer/teach_runs" />
+  <param name="/data_load_dir" value="$(env HOME)/jetracer/teach_runs" />
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       IMAGE PROCESSING  — must be IDENTICAL in teach AND repeat
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    Images are resized to this resolution before patch-normalisation,
+    storage, and comparison.  115×44 is the QVPR paper default and is
+    Jetson Nano-safe at 20+ Hz.  Do NOT increase — larger images add
+    latency with no accuracy benefit for this algorithm.
+  -->
+  <param name="/image_resize_width"  value="115" />
+  <param name="/image_resize_height" value="44"  />
+
+  <!--
+    Patch normalisation kernel size for lighting robustness.
+    [9, 9] works well indoors.  Try [15, 15] only if lighting is very
+    uneven (e.g. strong spotlights mixed with shadows).
+  -->
+  <param name="/patch_size" value="[9, 9]" />
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       ROUTE PARAMETERS  — must be IDENTICAL in teach AND repeat
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    Distance between adjacent stored waypoints in metres.
+    MUST match data_collect.py's ~distance_threshold parameter (set in teach).
+    0.3 m is tuned for indoor hallways at ~0.35 m/s JetRacer speed.
+  -->
+  <param name="/goal_pose_separation" value="0.1" />
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       CAMERA GEOMETRY  — used by lateral correction math in localiser
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    Horizontal field of view of your camera lens in degrees.
+    WRONG VALUE → miscalibrated lateral steering corrections.
+    EDIT ME: set to your actual lens (see guide at top of this file).
+  -->
+  <param name="/image_field_of_view_width_deg" value="160.0" />
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       MISC
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    Whether localiser.py waits for a 'ready_localiser' ROS service call
+    before starting the repeat route.
+    false = start immediately (correct for the standard JetRacer workflow).
+  -->
+  <param name="/wait_for_ready" value="false" />
+
+</launch>

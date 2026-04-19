@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!--
+  jetracer_repeat_pose_only.launch
+  ─────────────────────────────────────────────────────────────────────────────
+  Repeat mode that uses pose files only.
+
+  This launch file does NOT use image matching or any external localiser.
+  It simply:
+    • starts odom_integrator to create /odom
+    • loads stored pose files from the chosen teach run
+    • publishes Pose2D goals
+    • drives the robot with the existing controller
+
+  Usage:
+    roslaunch abc jetracer_repeat_pose_only.launch
+
+  Optional:
+    roslaunch abc jetracer_repeat_pose_only.launch run_dir:=/home/jetson/jetracer/teach_runs/<run>
+-->
+<launch>
+
+  <arg name="run_dir" default="$(env HOME)/jetracer/teach_runs" />
+
+  <!-- Shared odom + parameters -->
+  <include file="$(find abc)/launch/jetracer_teach_repeat_core.launch" />
+
+  <!-- Select a specific teach run, or the latest one in teach_runs/ -->
+  <param name="/data_load_dir" value="$(arg run_dir)" />
+
+  <!-- Pose-only localiser: reads *_pose.txt and publishes /goal -->
+  <node name="pose_file_localiser" pkg="abc"
+        type="pose_file_localiser.py" output="screen" required="true">
+    <param name="~run_dir" value="$(arg run_dir)" />
+    <param name="~goal_radius" value="0.25" />
+    <param name="~publish_hz" value="15.0" />
+    <param name="~behind_skip_threshold_deg" value="85.0" />
+    <param name="~max_skip_ahead" value="200" />
+    <param name="~loop_route" value="true" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+  <!-- Pose controller -->
+  <node name="jetracer_controller" pkg="abc"
+        type="jetracer_drive_to_pose_controller.py"
+        output="screen" required="true">
+    <param name="~lookahead_distance"   value="0.40" />
+    <param name="~cruise_speed"         value="0.35" />
+    <param name="~min_speed"            value="0.15" />
+    <param name="~slow_down_dist"       value="0.35" />
+    <param name="~goal_threshold"       value="0.20" />
+    <param name="~wheelbase"            value="0.16" />
+    <param name="~max_steer_angle_deg"  value="28.0" />
+    <param name="~behind_threshold_deg" value="90.0" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+</launch>

@@ -1,0 +1,377 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import division, print_function
+
+import glob
+import json
+import math
+import os
+import re
+
+import cv2
+import numpy as np
+import rospy
+import tf.transformations as tft
+from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import Pose2D, PoseWithCovarianceStamped
+from sensor_msgs.msg import Image
+
+
+def _wrap(angle):
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+class VisualPoseLocaliser(object):
+    """
+    Visual + pose localiser for teach-repeat.
+
+    - Uses stored pose files as nominal route
+    - Uses image matching in a local search window to correct route index
+    - Applies a bounded heading correction from horizontal image shift
+    """
+
+    def __init__(self):
+        rospy.init_node('visual_pose_localiser')
+
+        self.bridge = CvBridge()
+
+        # Inputs / outputs
+        self.run_dir_param = rospy.get_param('~run_dir', os.path.expanduser('~/jetracer/teach_runs'))
+        self.image_topic = rospy.get_param('~image_topic', '/csi_cam_0/image_raw')
+        self.odom_topic = rospy.get_param('~odom_topic', '/odom_combined')
+        self.goal_topic = rospy.get_param('~goal_topic', 'goal')
+
+        # Route / progress
+        self.goal_radius = float(rospy.get_param('~goal_radius', 0.25))
+        self.publish_hz = float(rospy.get_param('~publish_hz', 15.0))
+        self.loop_route = bool(rospy.get_param('~loop_route', False))
+        self.lookahead_steps = int(rospy.get_param('~lookahead_steps', 2))
+        self.behind_skip_threshold_deg = float(rospy.get_param('~behind_skip_threshold_deg', 85.0))
+        self.max_skip_ahead = int(rospy.get_param('~max_skip_ahead', 200))
+
+        # Visual matching
+        self.search_range = int(rospy.get_param('~search_range', 8))
+        self.corr_threshold = float(rospy.get_param('~corr_threshold', 0.02))
+        self.max_index_jump = int(rospy.get_param('~max_index_jump', 5))
+        self.heading_gain = float(rospy.get_param('~heading_gain', 0.8))
+        self.heading_sign = float(rospy.get_param('~heading_sign', -1.0))
+        self.max_heading_correction_deg = float(rospy.get_param('~max_heading_correction_deg', 12.0))
+
+        # Image preprocessing params (must match teach/repeat settings)
+        self.resize_w = int(rospy.get_param('/image_resize_width', rospy.get_param('~image_resize_width', 115)))
+        self.resize_h = int(rospy.get_param('/image_resize_height', rospy.get_param('~image_resize_height', 44)))
+        self.image_fov_deg = float(rospy.get_param('/image_field_of_view_width_deg', 160.0))
+        self.image_fov_rad = math.radians(self.image_fov_deg)
+
+        self.max_heading_correction_rad = math.radians(self.max_heading_correction_deg)
+
+        # State
+        self.have_odom = False
+        self.have_image = False
+        self.rx = 0.0
+        self.ry = 0.0
+        self.ryaw = 0.0
+        self.current_desc = None
+        self.current_img_stamp = None
+        self.idx = 0
+
+        self.run_dir, self.samples = self._load_route(self.run_dir_param)
+        if not self.samples:
+            rospy.logfatal('[visual_pose_localiser] No matched pose/image samples found in %s', self.run_dir)
+            raise RuntimeError('No samples')
+
+        self.goal_pub = rospy.Publisher(self.goal_topic, Pose2D, queue_size=1)
+        rospy.Subscriber(self.odom_topic, PoseWithCovarianceStamped, self._odom_cb, queue_size=1)
+        rospy.Subscriber(self.image_topic, Image, self._image_cb, queue_size=1)
+
+        rospy.loginfo('[visual_pose_localiser] Loaded %d samples from %s', len(self.samples), self.run_dir)
+        rospy.loginfo('[visual_pose_localiser] image_topic=%s odom_topic=%s search_range=%d corr_threshold=%.2f',
+                      self.image_topic, self.odom_topic, self.search_range, self.corr_threshold)
+
+    @staticmethod
+    def _extract_idx(path):
+        m = re.search(r'(\d+)', os.path.basename(path))
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _read_pose(path):
+        with open(path, 'r') as fh:
+            data = json.loads(fh.read())
+        x = float(data['position']['x'])
+        y = float(data['position']['y'])
+        qx = float(data['orientation']['x'])
+        qy = float(data['orientation']['y'])
+        qz = float(data['orientation']['z'])
+        qw = float(data['orientation']['w'])
+        _, _, yaw = tft.euler_from_quaternion([qx, qy, qz, qw])
+        return x, y, yaw
+
+    def _preprocess(self, bgr):
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        if self.resize_w > 0 and self.resize_h > 0:
+            gray = cv2.resize(gray, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
+
+        img = gray.astype(np.float32) / 255.0
+
+        # Local contrast normalization (robust to lighting change)
+        blur = cv2.GaussianBlur(img, (0, 0), 1.2)
+        norm = img - blur
+        std = float(np.std(norm))
+        if std < 1e-6:
+            std = 1.0
+        norm = norm / std
+        return norm
+
+    def _resolve_run_dir(self, path):
+        path = os.path.expanduser(path)
+        if not os.path.isdir(path):
+            return path
+
+        pose_files = glob.glob(os.path.join(path, '*_pose.txt'))
+        if pose_files:
+            return path
+
+        subs = [os.path.join(path, d) for d in sorted(os.listdir(path)) if os.path.isdir(os.path.join(path, d))]
+        candidates = []
+        for d in subs:
+            if glob.glob(os.path.join(d, '*_pose.txt')):
+                candidates.append(d)
+        if candidates:
+            return candidates[-1]
+        return path
+
+    def _load_route(self, run_dir_param):
+        run_dir = self._resolve_run_dir(run_dir_param)
+        pose_files = sorted(glob.glob(os.path.join(run_dir, '*_pose.txt')))
+
+        # Build image map by index from full/frame_XXXXXX.png
+        img_files = sorted(glob.glob(os.path.join(run_dir, 'full', '*.png')))
+        img_map = {}
+        for p in img_files:
+            i = self._extract_idx(p)
+            if i is not None:
+                img_map[i] = p
+
+        samples = []
+        for pose_path in pose_files:
+            i = self._extract_idx(pose_path)
+            if i is None or i not in img_map:
+                continue
+
+            try:
+                x, y, yaw = self._read_pose(pose_path)
+                bgr = cv2.imread(img_map[i], cv2.IMREAD_COLOR)
+                if bgr is None:
+                    continue
+                desc = self._preprocess(bgr)
+                samples.append((x, y, yaw, desc))
+            except Exception as e:
+                rospy.logwarn('[visual_pose_localiser] Skipping sample %s (%s)', pose_path, str(e))
+
+        return run_dir, samples
+
+    def _odom_cb(self, msg):
+        q = msg.pose.pose.orientation
+        _, _, yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
+        self.rx = msg.pose.pose.position.x
+        self.ry = msg.pose.pose.position.y
+        self.ryaw = yaw
+        self.have_odom = True
+
+    def _image_cb(self, msg):
+        try:
+            bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.current_desc = self._preprocess(bgr)
+            self.current_img_stamp = msg.header.stamp
+            self.have_image = True
+        except CvBridgeError as e:
+            rospy.logwarn_throttle(2.0, '[visual_pose_localiser] Image conversion failed: %s', str(e))
+
+    def _nearest_index(self):
+        best_i = 0
+        best_d2 = 1e18
+        for i, (x, y, _, _) in enumerate(self.samples):
+            dx = x - self.rx
+            dy = y - self.ry
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best_i = i
+        return best_i
+
+    def _indices_in_window(self, center, half):
+        n = len(self.samples)
+        if n == 0:
+            return []
+        out = []
+        for k in range(-half, half + 1):
+            j = center + k
+            if self.loop_route:
+                j %= n
+                out.append(j)
+            else:
+                if 0 <= j < n:
+                    out.append(j)
+        # de-dup while preserving order
+        seen = set()
+        uniq = []
+        for j in out:
+            if j not in seen:
+                seen.add(j)
+                uniq.append(j)
+        return uniq
+
+    @staticmethod
+    def _corr(a, b):
+        av = a.ravel()
+        bv = b.ravel()
+        am = av - np.mean(av)
+        bm = bv - np.mean(bv)
+        denom = (np.linalg.norm(am) * np.linalg.norm(bm))
+        if denom < 1e-12:
+            return -1.0
+        return float(np.dot(am, bm) / denom)
+
+    def _estimate_yaw_error(self, teach_desc, query_desc):
+        # Returns horizontal shift in pixels; convert to radians by FOV.
+        shift, _ = cv2.phaseCorrelate(teach_desc.astype(np.float32), query_desc.astype(np.float32))
+        dx = float(shift[0])
+        width_px = float(query_desc.shape[1])
+        yaw = self.heading_sign * self.heading_gain * (dx / width_px) * self.image_fov_rad
+        yaw = _clamp(yaw, -self.max_heading_correction_rad, self.max_heading_correction_rad)
+        return yaw, dx
+
+    def _bearing_to_point(self, gx, gy):
+        return _wrap(math.atan2(gy - self.ry, gx - self.rx) - self.ryaw)
+
+    def _skip_ahead_if_goal_behind(self):
+        threshold = math.radians(self.behind_skip_threshold_deg)
+        start_idx = self.idx
+        best_idx = self.idx
+        best_abs = float('inf')
+
+        steps_limit = min(self.max_skip_ahead, len(self.samples))
+        for step in range(steps_limit):
+            if self.loop_route:
+                cand = (start_idx + step) % len(self.samples)
+            else:
+                cand = start_idx + step
+                if cand >= len(self.samples):
+                    break
+
+            gx, gy, _, _ = self.samples[cand]
+            b = abs(self._bearing_to_point(gx, gy))
+            if b < best_abs:
+                best_abs = b
+                best_idx = cand
+            if b <= threshold:
+                self.idx = cand
+                break
+        else:
+            self.idx = best_idx
+
+    def _advance_if_reached(self):
+        gx, gy, _, _ = self.samples[self.idx]
+        dist = math.hypot(gx - self.rx, gy - self.ry)
+        if dist < self.goal_radius:
+            if self.loop_route:
+                self.idx = (self.idx + 1) % len(self.samples)
+            else:
+                self.idx = min(self.idx + 1, len(self.samples) - 1)
+
+    def _visual_update(self):
+        if self.current_desc is None:
+            return 0.0, 0.0, -1.0
+
+        candidates = self._indices_in_window(self.idx, self.search_range)
+        if not candidates:
+            return 0.0, 0.0, -1.0
+
+        best_i = self.idx
+        best_corr = -2.0
+        for i in candidates:
+            c = self._corr(self.samples[i][3], self.current_desc)
+            if c > best_corr:
+                best_corr = c
+                best_i = i
+
+        if best_corr < self.corr_threshold:
+            return 0.0, 0.0, best_corr
+
+        # Bound sudden index jumps for stability
+        delta = best_i - self.idx
+        if self.loop_route:
+            n = len(self.samples)
+            if delta > n // 2:
+                delta -= n
+            elif delta < -n // 2:
+                delta += n
+
+        delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
+        if self.loop_route:
+            self.idx = (self.idx + delta) % len(self.samples)
+        else:
+            self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
+
+        teach_desc = self.samples[self.idx][3]
+        yaw_corr, dx = self._estimate_yaw_error(teach_desc, self.current_desc)
+        return yaw_corr, dx, best_corr
+
+    def run(self):
+        rate = rospy.Rate(self.publish_hz)
+
+        while not rospy.is_shutdown() and not self.have_odom:
+            rospy.loginfo_throttle(2.0, '[visual_pose_localiser] Waiting for odom...')
+            rate.sleep()
+
+        while not rospy.is_shutdown() and not self.have_image:
+            rospy.loginfo_throttle(2.0, '[visual_pose_localiser] Waiting for camera image...')
+            rate.sleep()
+
+        self.idx = self._nearest_index()
+        rospy.loginfo('[visual_pose_localiser] Starting from nearest index %d', self.idx)
+
+        while not rospy.is_shutdown():
+            self._advance_if_reached()
+            self._skip_ahead_if_goal_behind()
+
+            yaw_corr, dx, corr = self._visual_update()
+
+            goal_idx = self.idx
+            if self.loop_route:
+                goal_idx = (goal_idx + self.lookahead_steps) % len(self.samples)
+            else:
+                goal_idx = min(goal_idx + self.lookahead_steps, len(self.samples) - 1)
+
+            gx, gy, gth, _ = self.samples[goal_idx]
+            gth = _wrap(gth + yaw_corr)
+
+            msg = Pose2D()
+            msg.x = gx
+            msg.y = gy
+            msg.theta = gth
+            self.goal_pub.publish(msg)
+
+            rospy.loginfo_throttle(
+                1.0,
+                '[visual_pose_localiser] idx=%d goal=%d corr=%.3f dx=%.2fpx yaw_corr=%.2fdeg',
+                self.idx,
+                goal_idx,
+                corr,
+                dx,
+                math.degrees(yaw_corr)
+            )
+
+            rate.sleep()
+
+
+if __name__ == '__main__':
+    try:
+        VisualPoseLocaliser().run()
+    except rospy.ROSInterruptException:
+        pass

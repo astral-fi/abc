@@ -1,0 +1,53 @@
+<?xml version="1.0"?>
+<!--
+  jetracer_repeat_pose.launch
+  -----------------------------------------------------------------------------
+  Repeat mode using pose files only (no image_matcher/localiser dependency).
+
+  This launch is intended for teach-run folders that store:
+    - *_pose.txt files at run root
+    - optional full/*.png images
+
+  It uses:
+    - odom_integrator.py
+    - pose_file_localiser.py (publishes /goal from *_pose.txt)
+    - jetracer_drive_to_pose_controller.py
+-->
+<launch>
+
+  <!-- Pass either a specific run dir OR the parent teach_runs folder.
+       If parent is provided, pose_file_localiser picks the latest run
+       containing *_pose.txt files. -->
+  <arg name="run_dir" default="$(env HOME)/jetracer/teach_runs" />
+
+  <!-- Shared params + /odom from /odom_raw -->
+  <include file="$(find abc)/launch/jetracer_teach_repeat_core.launch" />
+
+  <!-- Keep global data path aligned with this run -->
+  <param name="/data_load_dir" value="$(arg run_dir)" />
+
+  <node name="pose_file_localiser" pkg="abc"
+        type="pose_file_localiser.py" output="screen" required="true">
+    <param name="~run_dir" value="$(arg run_dir)" />
+    <param name="~goal_radius" value="0.25" />
+    <param name="~publish_hz" value="15.0" />
+    <param name="~behind_skip_threshold_deg" value="85.0" />
+    <param name="~max_skip_ahead" value="200" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+  <node name="jetracer_controller" pkg="abc"
+        type="jetracer_drive_to_pose_controller.py"
+        output="screen" required="true">
+    <param name="~lookahead_distance"   value="0.40" />
+    <param name="~cruise_speed"         value="0.35" />
+    <param name="~min_speed"            value="0.15" />
+    <param name="~slow_down_dist"       value="0.35" />
+    <param name="~goal_threshold"       value="0.20" />
+    <param name="~wheelbase"            value="0.16" />
+    <param name="~max_steer_angle_deg"  value="28.0" />
+    <param name="~behind_threshold_deg" value="120.0" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+</launch>

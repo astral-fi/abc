@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>abc</name>
+  <version>1.0.0</version>
+  <description>
+    JetRacer-specific wrapper nodes and launch files for QVPR/teach-repeat
+    visual teach-and-repeat navigation.  Provides an Ackermann Pure-Pursuit
+    controller, a cmd_vel-to-hardware bridge, and ready-to-use launch files
+    for both the teach and repeat phases.
+  </description>
+
+  <maintainer email="your@email.com">Your Name</maintainer>
+  <license>BSD</license>
+  <url type="repository">https://github.com/QVPR/teach-repeat</url>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- ROS message / service packages -->
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- TF + image utilities -->
+  <depend>tf</depend>
+  <depend>cv_bridge</depend>
+
+  <!-- Teleop -->
+  <depend>joy</depend>
+  <depend>teleop_twist_joy</depend>
+
+  <!-- Python numeric stack (Melodic = Python 2) -->
+  <depend condition="$ROS_PYTHON_VERSION == 2">python-numpy</depend>
+  <depend condition="$ROS_PYTHON_VERSION == 3">python3-numpy</depend>
+</package>

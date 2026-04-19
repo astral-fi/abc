@@ -1,0 +1,130 @@
+<?xml version="1.0"?>
+<!--
+  jetracer_teach.launch
+  ─────────────────────────────────────────────────────────────────────────────
+  Teach phase for QVPR/teach-repeat on JetRacer.
+
+  ASSUMED ALREADY RUNNING (your separate terminals)
+  ─────────────────────────────────────────────────────────────────────────────
+    Terminal 1:  roslaunch jetracer jetracer.launch
+                 Provides: /odom_raw, /cmd_vel subscriber (hardware bridge)
+
+    Terminal 2:  roslaunch jetracer csi_camera.launch
+                 Provides: /camera/image_raw
+
+    Terminal 3:  roslaunch jetracer joy
+                 Provides: joy_node + teleop_twist_joy → /cmd_vel
+                 You can already drive the robot with the gamepad.
+
+  This launch file does NOT re-launch any of the above.  It only adds:
+    • odom_integrator   (via core include) → /odom
+    • data_collect.py                      → waypoint collection
+    • data_save.py                         → saves poses + images in full/
+
+  USAGE
+  ─────────────────────────────────────────────────────────────────────────────
+    roslaunch abc jetracer_teach.launch
+
+  Then drive the robot manually using your gamepad (already configured).
+  data_collect.py will automatically record a waypoint every time the robot
+  travels ~0.3 m or rotates ~12°.  A timestamped folder is created in:
+    ~/jetracer/teach_runs/
+
+  STOPPING THE TEACH RUN
+  ─────────────────────────────────────────────────────────────────────────────
+  Press Ctrl+C in this terminal.  data_save.py flushes the final waypoints
+  before shutting down (it uses rospy.on_shutdown).
+-->
+<launch>
+
+  <!-- ── Load shared parameters and start odom_integrator ──────────────────
+       This include provides /odom (integrated from /odom_raw) and sets
+       all global teach-repeat parameters consistently.
+  ──────────────────────────────────────────────────────────────────────────-->
+  <include file="$(find abc)/launch/jetracer_teach_repeat_core.launch" />
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       DATA COLLECTION
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+  <!--
+    data_collect.py
+    ───────────────
+    Subscribes to:
+      image  → /csi_cam_0/image_raw   (from the CSI camera node)
+      odom   → /odom               (from odom_integrator, started above)
+
+    Stores a new waypoint whenever the robot travels ≥ distance_threshold
+    metres OR rotates ≥ angle_threshold_deg degrees.  Both thresholds must
+    match /goal_pose_separation (set in core launch, currently 0.3 m).
+
+    Publishes collected waypoints to data_save.py.
+  -->
+  <node name="data_collect" pkg="abc"
+        type="data_collect.py" output="screen" required="true">
+
+    <!-- Map teach_repeat's generic topic names to your JetRacer topics -->
+      <remap from="image" to="/csi_cam_0/image_raw" />
+    <remap from="odom"  to="/odom_combined" />
+
+    <!--
+      Waypoint spacing thresholds.
+
+      distance_threshold:
+        Store a waypoint every 0.3 m of forward travel.
+        At ~0.35 m/s teach speed this gives ~1 waypoint per 0.86 s,
+        leaving ~25 camera frames of margin at 30 Hz.
+
+      angle_threshold_deg:
+        Also store a waypoint when the robot turns > 12°, regardless
+        of distance.  This captures corners without missing them.
+
+      BOTH must match /goal_pose_separation in the core launch (0.3 m).
+    -->
+    <param name="~distance_threshold"  value="0.05" />
+    <param name="~angle_threshold_deg" value="4.0" />
+    <param name="~use_angle_trigger"   value="true" />
+    <param name="~waypoint_topic"      value="/teach_repeat/waypoint" />
+  </node>
+
+  <!--
+    data_save.py
+    ────────────
+    Saves images into full/ and poses as *_pose.txt at the run root.
+    Capture is movement-based, so static frames are skipped.
+
+    Each teach session gets its own folder (e.g. teach_runs/2026-04-02_10-30-00/)
+    so previous runs are never overwritten.
+
+    EDIT ME: change save_dir if you store teach data elsewhere.
+  -->
+  <node name="data_save" pkg="abc"
+        type="data_save.py" output="screen" required="true">
+    <param name="~save_dir"         value="$(env HOME)/jetracer/teach_runs" />
+    <param name="~timestamp_folder" value="true" />
+    <param name="~distance_threshold" value="0.05" />
+    <param name="~angle_threshold_deg" value="4.0" />
+    <param name="~capture_on_angle" value="true" />
+    <param name="~min_linear_speed"  value="0.03" />
+    <param name="~image_topic"      value="/csi_cam_0/image_raw" />
+    <param name="~odom_topic"       value="/odom_combined" />
+  </node>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       NO TELEOP / HARDWARE NODES HERE
+       ───────────────────────────────
+       Your `roslaunch jetracer joy` terminal already runs:
+         • joy_node         (reads /dev/input/js0)
+         • teleop_twist_joy (publishes /cmd_vel from joystick)
+       And `roslaunch jetracer jetracer.launch` already runs:
+         • The hardware bridge (servo + ESC) subscribed to /cmd_vel
+
+       Re-launching any of those here would create duplicate nodes and
+       cause topic conflicts.  Drive the robot with your existing gamepad
+       setup as normal — data_collect.py records transparently in the
+       background.
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+</launch>

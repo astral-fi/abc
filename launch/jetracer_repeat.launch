@@ -1,0 +1,165 @@
+<?xml version="1.0"?>
+<!--
+  jetracer_repeat.launch
+  ─────────────────────────────────────────────────────────────────────────────
+  Repeat (autonomous) phase for QVPR/teach-repeat on JetRacer.
+
+  ASSUMED ALREADY RUNNING (your separate terminals)
+  ─────────────────────────────────────────────────────────────────────────────
+    Terminal 1:  roslaunch jetracer jetracer.launch
+                 Provides: /odom_raw, /cmd_vel subscriber (servo + ESC hardware)
+                 *** THE ROBOT WILL MOVE when /cmd_vel is published ***
+
+    Terminal 2:  roslaunch jetracer csi_camera.launch
+                 Provides: /camera/image_raw
+
+    (Terminal 3 / joy not needed during repeat — robot drives itself)
+
+  This launch file adds:
+    • odom_integrator            (via core include) → /odom
+    • visual_pose_localiser.py   → pose + image matching → /goal waypoints
+    • jetracer_drive_to_pose_controller.py → /goal + /odom → /cmd_vel
+
+  /cmd_vel is consumed by the hardware bridge already running in Terminal 1.
+
+  SAFETY
+  ─────────────────────────────────────────────────────────────────────────────
+  The robot WILL begin moving autonomously once the localiser publishes the first
+  goal.  Clear the path BEFORE launching this file.
+  Emergency stop: Ctrl+C in this terminal (sends a zero Twist on shutdown).
+
+  USAGE
+  ─────────────────────────────────────────────────────────────────────────────
+    roslaunch abc jetracer_repeat.launch
+
+  The robot will navigate the teach route autonomously.
+-->
+<launch>
+
+  <!-- Point at either the parent teach_runs directory OR a specific run.
+       If you pass a specific run, it should contain full/ and norm/ images. -->
+  <arg name="run_dir" default="$(env HOME)/jetracer/teach_runs" />
+
+  <!-- ── Shared parameters + odom_integrator ───────────────────────────────
+       Provides /odom (integrated from /odom_raw).
+       Parameters MUST be identical to those used during the teach phase.
+  ──────────────────────────────────────────────────────────────────────────-->
+  <include file="$(find abc)/launch/jetracer_teach_repeat_core.launch" />
+
+  <!-- Override the default load dir from core launch so we can select a run. -->
+  <param name="/data_load_dir" value="$(arg run_dir)" />
+
+    <!-- teach_repeat/localiser expects a map->odom TF in some configurations.
+     If you are not running SLAM/localisation, publish an identity map->odom. -->
+    <node name="map_to_odom" pkg="tf2_ros" type="static_transform_publisher"
+      args="0 0 0 0 0 0 map odom" />
+
+
+    <!-- ═══════════════════════════════════════════════════════════════════════
+      VISUAL + POSE LOCALISER
+      Uses stored poses as nominal path and image matching for correction.
+    ═══════════════════════════════════════════════════════════════════════════ -->
+    <node name="visual_pose_localiser" pkg="abc"
+       type="visual_pose_localiser.py" output="screen" required="true">
+    <param name="~run_dir" value="$(arg run_dir)" />
+      <param name="~image_topic" value="/csi_cam_0/image_raw" />
+      <param name="~odom_topic" value="/odom_combined" />
+    <param name="~goal_radius" value="0.10" />
+    <param name="~publish_hz" value="15.0" />
+      <param name="~lookahead_steps" value="2" />
+      <param name="~search_range" value="3" />
+      <param name="~corr_threshold" value="0.15" />
+      <param name="~max_index_jump" value="5" />
+      <param name="~heading_gain" value="0.3" />
+      <param name="~heading_sign" value="-1.0" />
+      <param name="~max_heading_correction_deg" value="10.0" />
+    <param name="~behind_skip_threshold_deg" value="85.0" />
+    <param name="~max_skip_ahead" value="200" />
+    <param name="~loop_route" value="false" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       ACKERMANN PURE-PURSUIT CONTROLLER
+       ───────────────────────────────────────────────────────────────────────
+       Subscribes:
+         /odom  (nav_msgs/Odometry)   — integrated pose from odom_integrator
+         goal   (geometry_msgs/Pose2D) — next waypoint from localiser.py
+
+       Publishes:
+         /cmd_vel (geometry_msgs/Twist)
+           linear.x  = forward speed  (m/s,   always ≥ 0)
+           angular.z = yaw rate proxy (rad/s, derived from bicycle model)
+
+       /cmd_vel is consumed by the hardware bridge already running inside
+       `roslaunch jetracer jetracer.launch` (Terminal 1).  No bridge node
+       is launched here — that would create a duplicate subscriber conflict.
+  ═══════════════════════════════════════════════════════════════════════════ -->
+  <node name="jetracer_controller" pkg="abc"
+        type="jetracer_drive_to_pose_controller.py"
+        output="screen" required="true">
+
+    <!--
+      ── THE PRIMARY TUNING PARAMETER ──
+      lookahead_distance (L):
+        Pure-Pursuit lookahead in metres.
+        Too small → robot weaves / oscillates on straights.
+        Too large → robot cuts corners / leaves the path in turns.
+        Start at 0.40 m.  Adjust in 0.05 m steps based on observed behaviour.
+    -->
+    <param name="~lookahead_distance"   value="0.20" />
+
+    <!--
+      cruise_speed:
+        Forward speed during repeat in m/s.
+        Keep ≤ 0.40 m/s for first runs.  Match the speed driven during teach.
+    -->
+    <param name="~cruise_speed"         value="0.40" />
+
+    <!--
+      min_speed:
+        Minimum forward speed while a steering command is active (m/s).
+        Ackermann geometry: at very low speeds angular.z has poor authority.
+        Never set below 0.10 m/s on a JetRacer.
+    -->
+    <param name="~min_speed"            value="0.12" />
+
+    <param name="~slow_down_dist"       value="0.35" />
+    <param name="~goal_threshold"       value="0.10" />
+    <param name="~wheelbase"            value="0.16" />
+    <param name="~linear_sign"          value="-1.0" />
+
+    <!--
+      max_steer_angle_deg:
+        Maximum physical servo travel from centre (degrees).
+        JetRacer servo: approximately ±28–32°.  Use 28° for safety margin.
+        EDIT ME: verify against your servo's actual range.
+    -->
+    <param name="~max_steer_angle_deg"  value="28.0" />
+
+    <!--
+      behind_threshold_deg:
+        If the goal is more than this angle behind the robot, stop and wait
+        for localiser to advance to the next waypoint.
+        Prevents impossible reverse manoeuvres on an Ackermann platform.
+        90° is a safe default — do not set below 60°.
+    -->
+    <param name="~behind_threshold_deg" value="90.0" />
+    <remap from="goal" to="/goal" />
+  </node>
+
+
+  <!-- ═══════════════════════════════════════════════════════════════════════
+       NO HARDWARE BRIDGE HERE
+       ─────────────────────────────────────────────────────────────────────
+       cmd_vel_to_jetracer.py (servo + ESC control) is already running
+       inside Terminal 1 (`roslaunch jetracer jetracer.launch`).
+
+       The controller above publishes /cmd_vel (geometry_msgs/Twist).
+       That topic is already subscribed to by the JetRacer hardware stack.
+       Launching another bridge node here would create a duplicate and
+       cause "multiple publishers" conflicts or I2C bus contention.
+  ═══════════════════════════════════════════════════════════════════════════ -->
+
+</launch>
