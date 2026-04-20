@@ -73,6 +73,10 @@ class VisualPoseLocaliser(object):
         self.lookahead_steps = int(rospy.get_param('~lookahead_steps', 2))
         self.behind_skip_threshold_deg = float(rospy.get_param('~behind_skip_threshold_deg', 85.0))
         self.max_skip_ahead = int(rospy.get_param('~max_skip_ahead', 200))
+        # ~start_index: force a fixed starting waypoint index.
+        # Set to 0 to always begin from the first waypoint (useful when odom
+        # is not reset between teach and repeat).  -1 means "nearest" (default).
+        self.start_index = int(rospy.get_param('~start_index', -1))
 
         # Visual matching
         self.search_range = int(rospy.get_param('~search_range', 8))
@@ -521,8 +525,13 @@ class VisualPoseLocaliser(object):
             rospy.loginfo_throttle(2.0, '[visual_pose_localiser] Waiting for camera image...')
             rate.sleep()
 
-        self.idx = self._nearest_index()
-        rospy.loginfo('[visual_pose_localiser] Starting from nearest index %d', self.idx)
+        if self.start_index >= 0:
+            self.idx = int(_clamp(self.start_index, 0, len(self.samples) - 1))
+            rospy.loginfo('[visual_pose_localiser] Forced start index %d '
+                         '(~start_index param)', self.idx)
+        else:
+            self.idx = self._nearest_index()
+            rospy.loginfo('[visual_pose_localiser] Starting from nearest index %d', self.idx)
 
         while not rospy.is_shutdown():
             self._advance_if_reached()
