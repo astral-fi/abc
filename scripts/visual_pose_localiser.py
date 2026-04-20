@@ -615,44 +615,28 @@ class VisualPoseLocaliser(object):
             tx, ty, tth = self.samples[self.idx][0], self.samples[self.idx][1], self.samples[self.idx][2]
             gx, gy, gth = self.samples[goal_idx][0], self.samples[goal_idx][1], self.samples[goal_idx][2]
                           
-            # CRITICAL FIX: The base controller compares the goal to current odometry to steer.
-            # By calculating the *geometric shape* of the curved path (vector from tx to gx),
-            # and mapping it identically relative to the robot's physical drifted position + yaw_corr,
-            # we beautifully trace curves WITHOUT suffering from the massive absolute odometry drift!
-
-            # 1. Find relative vector in the teach run absolute frame
-            vx = gx - tx
-            vy = gy - ty
+            # CRITICAL FIX: To prevent "long wide turns" (understeering) on skid-steer JetRacers:
+            # DO NOT mathematically project a 2D mapping (local_x) which relies on drifted ryaw orientations.
+            # Instead, we use "Feed-Forward Purely Reactive" logic:
+            # 1. Take the robot's drifted heading (self.ryaw)
+            # 2. Add visual correction (yaw_corr)
+            # 3. Add the natural curve of the recorded track directly (gth - tth)
             
-            # 2. Transform vector to the LOCAL coordinate frame of the teach waypoint
-            local_x = vx * math.cos(tth) + vy * math.sin(tth)
-            local_y = -vx * math.sin(tth) + vy * math.cos(tth)
+            curve_feedforward = _wrap(gth - tth)
+            proj_yaw = _wrap(self.ryaw + yaw_corr + curve_feedforward)
             
-            if not self.loop_route and self.idx == len(self.samples) - 1:
-                # We have reached the absolute final visual waypoint for the first time.
+            lookahead_radius = max(dist_accum, 0.25)
+            
+            msg = Pose2D()
+            msg.x = self.rx + lookahead_radius * math.cos(proj_yaw)
+            msg.y = self.ry + lookahead_radius * math.sin(proj_yaw)
+            msg.theta = proj_yaw
+            
+            # Numerically stabilize terminal parking: prevent coasting past finish
+            if not self.loop_route and self.idx >= len(self.samples) - 2:
+                # We have reached the absolute final visual waypoint
                 self._finished = True
                 rospy.loginfo('[visual_pose_localiser] Mission Complete! Latching parking state.')
-                continue
-                
-            # 3. Project this local road geometry out from the robot's currently perceived heading
-            proj_yaw = _wrap(self.ryaw + yaw_corr)
-            reactive_gx = self.rx + local_x * math.cos(proj_yaw) - local_y * math.sin(proj_yaw)
-            reactive_gy = self.ry + local_x * math.sin(proj_yaw) + local_y * math.cos(proj_yaw)
-            
-            # Numerically stabilize terminal parking: prevent explosion of dy / L^2
-            dist_to_goal = math.hypot(reactive_gx - self.rx, reactive_gy - self.ry)
-            if dist_to_goal < 0.20 and not self._finished:
-                scale = 0.20 / max(dist_to_goal, 0.01)
-                reactive_gx = self.rx + (reactive_gx - self.rx) * scale
-                reactive_gy = self.ry + (reactive_gy - self.ry) * scale
-
-            # 4. Target heading preserves the geometric turn rate of the curve
-            target_heading = _wrap(proj_yaw + _wrap(gth - tth))
-
-            msg = Pose2D()
-            msg.x = reactive_gx
-            msg.y = reactive_gy
-            msg.theta = target_heading
             self.goal_pub.publish(msg)
 
             # ── Debug topic: JSON-formatted correction diagnostics ──────────
