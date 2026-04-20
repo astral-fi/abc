@@ -133,6 +133,11 @@ class VisualPoseLocaliser(object):
         self.idx = 0
         self._last_correction_source = 'none'  # 'lk' or 'ncc'
         self._last_lk_confidence = 0.0
+        
+        # Dead-reckoning state for blindly advancing index during visual dropouts
+        self.last_rx = None
+        self.last_ry = None
+        self.accum_dist = 0.0
 
         self.run_dir, self.samples = self._load_route(self.run_dir_param)
         if not self.samples:
@@ -417,14 +422,41 @@ class VisualPoseLocaliser(object):
         else:
             self.idx = best_idx
 
-    def _advance_if_reached(self):
-        gx, gy = self.samples[self.idx][0], self.samples[self.idx][1]
-        dist = math.hypot(gx - self.rx, gy - self.ry)
-        if dist < self.goal_radius:
+    def _advance_open_loop(self):
+        """
+        Calculates physical delta-distance traveled frame-over-frame 
+        to blindly push the waypoint index forward along the path.
+        This guarantees the robot never gets permanently "stuck" doing donuts
+        if the camera momentarily loses the path during violent circular turns.
+        """
+        if self.last_rx is None:
+            self.last_rx = self.rx
+            self.last_ry = self.ry
+            return
+            
+        dist_moved = math.hypot(self.rx - self.last_rx, self.ry - self.last_ry)
+        self.last_rx = self.rx
+        self.last_ry = self.ry
+        self.accum_dist += dist_moved
+        
+        while True:
             if self.loop_route:
-                self.idx = (self.idx + 1) % len(self.samples)
+                next_i = (self.idx + 1) % len(self.samples)
             else:
-                self.idx = min(self.idx + 1, len(self.samples) - 1)
+                next_i = min(self.idx + 1, len(self.samples) - 1)
+                
+            if next_i == self.idx:
+                break
+                
+            step_d = math.hypot(self.samples[next_i][0] - self.samples[self.idx][0],
+                                self.samples[next_i][1] - self.samples[self.idx][1])
+                                
+            # If the robot has physically driven past the next waypoint distance, snap to it!
+            if self.accum_dist >= step_d and step_d > 0.001:
+                self.accum_dist -= step_d
+                self.idx = next_i
+            else:
+                break
 
     def _visual_update(self):
         """
@@ -470,9 +502,12 @@ class VisualPoseLocaliser(object):
         delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
         if self.loop_route:
             self.idx = (self.idx + delta) % len(self.samples)
-            
         else:
             self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
+            
+        # If visual tracker snapped the index, reset the blind dead-reckoning residual
+        if delta != 0:
+            self.accum_dist = 0.0
 
         # ── Yaw correction: LK-first, NCC-fallback ──────────────────────────
 
@@ -546,7 +581,7 @@ class VisualPoseLocaliser(object):
                 rate.sleep()
                 continue
 
-            self._advance_if_reached()
+            self._advance_open_loop()
 
             yaw_corr, dx, corr = self._visual_update()
 
