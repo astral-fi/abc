@@ -68,7 +68,7 @@
     <param name="~publish_hz" value="15.0" />
       <param name="~lookahead_steps" value="2" />
       <param name="~search_range" value="3" />
-      <param name="~corr_threshold" value="0.15" />
+      <param name="~corr_threshold" value="0.05" />
       <param name="~max_index_jump" value="5" />
       <param name="~heading_gain" value="0.3" />
       <param name="~heading_sign" value="-1.0" />
