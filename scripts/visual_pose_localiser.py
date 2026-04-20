@@ -487,7 +487,7 @@ class VisualPoseLocaliser(object):
             # for match_to_keyframe we only need the gray image of the keyframe.
             # Reconstruct a uint8 gray from the stored float32 descriptor:
             teach_gray_u8 = np.clip(
-                (teach_desc + teach_desc.min()) /
+                (teach_desc - teach_desc.min()) /
                 max(teach_desc.max() - teach_desc.min(), 1e-6) * 255.0,
                 0, 255,
             ).astype(np.uint8)
