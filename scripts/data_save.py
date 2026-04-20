@@ -3,12 +3,15 @@
 
 from __future__ import division, print_function
 
+import base64
 import datetime
 import json
 import math
 import os
+import struct
 
 import cv2
+import numpy as np
 import rospy
 import tf.transformations as tft
 from cv_bridge import CvBridge, CvBridgeError
@@ -31,6 +34,16 @@ class DataSave(object):
         self.min_linear_speed = float(rospy.get_param('~min_linear_speed', 0.03))
         self.angle_threshold_deg = float(rospy.get_param('~angle_threshold_deg', 12.0))
         self.capture_on_angle = bool(rospy.get_param('~capture_on_angle', False))
+        # LK feature sidecar: save ORB + Shi-Tomasi features per keyframe.
+        # Set ~save_features to false to disable without code changes.
+        self.save_features = bool(rospy.get_param('~save_features', True))
+        # Resize params (must match teach_repeat_core.launch)
+        self._feat_resize_w = int(rospy.get_param('/image_resize_width',
+                                  rospy.get_param('~image_resize_width', 115)))
+        self._feat_resize_h = int(rospy.get_param('/image_resize_height',
+                                  rospy.get_param('~image_resize_height', 44)))
+        # ORB detector for feature sidecar (50 features, lk_ prefix params)
+        self._orb = cv2.ORB_create(nfeatures=50)
 
         self._angle_threshold = math.radians(self.angle_threshold_deg)
         self.bridge = CvBridge()
@@ -107,6 +120,79 @@ class DataSave(object):
             self.capture_on_angle and dth_deg >= self.angle_threshold_deg):
             self._save_current()
 
+    # ------------------------------------------------------------------
+    # Feature sidecar helpers
+    # ------------------------------------------------------------------
+
+    def _extract_features(self, bgr):
+        """
+        Extract ORB keypoints/descriptors and Shi-Tomasi corners from *bgr*
+        (resized to lk_resize_w x lk_resize_h before extraction).
+
+        Returns a dict ready for JSON serialisation, or {} on failure.
+        New optional fields — does NOT affect existing pose-file format.
+        """
+        try:
+            small = cv2.resize(
+                bgr,
+                (self._feat_resize_w, self._feat_resize_h),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+            # ---- ORB ----
+            kp_list, des = self._orb.detectAndCompute(gray, None)
+
+            orb_kp_dicts = []
+            for kp in (kp_list or []):
+                orb_kp_dicts.append({
+                    'x':        float(kp.pt[0]),
+                    'y':        float(kp.pt[1]),
+                    'angle':    float(kp.angle),
+                    'response': float(kp.response),
+                    'size':     float(kp.size),
+                    'octave':   int(kp.octave),
+                })
+
+            # Descriptors: base64-encode the raw uint8 numpy array
+            if des is not None and len(des) > 0:
+                des_b64 = base64.b64encode(des.tobytes()).decode('ascii')
+                des_shape = list(des.shape)   # [N, 32]
+            else:
+                des_b64   = ''
+                des_shape = [0, 32]
+
+            # ---- Shi-Tomasi ----
+            corners = cv2.goodFeaturesToTrack(
+                gray,
+                maxCorners=50,
+                qualityLevel=0.01,
+                minDistance=5,
+            )
+            shi_pts = []
+            if corners is not None:
+                for c in corners:
+                    c = c.ravel()
+                    shi_pts.append([float(c[0]), float(c[1])])
+
+            return {
+                'orb_keypoints':         orb_kp_dicts,
+                'orb_descriptors_b64':   des_b64,
+                'orb_descriptors_shape': des_shape,
+                'shi_tomasi_pts':        shi_pts,
+                'image_w':               self._feat_resize_w,
+                'image_h':               self._feat_resize_h,
+            }
+        except Exception as e:
+            rospy.logwarn_throttle(
+                5.0,
+                '[data_save] feature extraction failed for frame %d: %s',
+                self._idx, str(e),
+            )
+            return {}
+
+    # ------------------------------------------------------------------
+
     def _save_current(self):
         x, y, theta, stamp = self._last_pose
 
@@ -126,6 +212,14 @@ class DataSave(object):
             pose_path = os.path.join(self.run_dir, 'frame_%06d_pose.txt' % self._idx)
             with open(pose_path, 'w') as fh:
                 fh.write(json.dumps(pose_obj, sort_keys=True))
+
+            # ---- Optional feature sidecar (new, does not affect pose format) ----
+            if self.save_features:
+                feat_obj  = self._extract_features(img)
+                feat_path = os.path.join(
+                    self.run_dir, 'frame_%06d_features.json' % self._idx)
+                with open(feat_path, 'w') as fh:
+                    fh.write(json.dumps(feat_obj, sort_keys=True))
 
             self._last_saved_pose = (x, y, theta, stamp)
             self._idx += 1
