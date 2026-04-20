@@ -97,8 +97,14 @@ class LKTracker(object):
             tileGridSize=_CLAHE_TILE_GRID,
         )
 
-        # ORB detector (shared instance)
-        self._orb = cv2.ORB_create(nfeatures=_ORB_N_FEATURES)
+        # ORB detector (shared instance). Tuned for extremely small 115x44 images.
+        # Defaults (edgeThreshold=31) mathematically kill 100% of features on an image 44px tall.
+        self._orb = cv2.ORB_create(
+            nfeatures=_ORB_N_FEATURES,
+            edgeThreshold=5,
+            patchSize=15,
+            fastThreshold=10
+        )
 
         # BFMatcher with cross-check (no ratio-test needed)
         self._bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
