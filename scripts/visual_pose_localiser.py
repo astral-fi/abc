@@ -551,11 +551,23 @@ class VisualPoseLocaliser(object):
 
             yaw_corr, dx, corr = self._visual_update()
 
-            goal_idx = self.idx
-            if self.loop_route:
-                goal_idx = (goal_idx + self.lookahead_steps) % len(self.samples)
-            else:
-                goal_idx = min(goal_idx + self.lookahead_steps, len(self.samples) - 1)
+            # GEOMETRIC GOAL SEARCH: Lookahead steps is often too short (e.g. 0.05m).
+            # This causes massive numeric explosion in the Pure Pursuit controller's 
+            # curvature calculation (L^2 denominator). We physically search forward.
+            search_idx = self.idx
+            dist_accum = 0.0
+            
+            while dist_accum < 0.35:  # ensure lookahead vector is geometrically stable
+                next_idx = (search_idx + 1) % len(self.samples) if self.loop_route else min(search_idx + 1, len(self.samples) - 1)
+                if next_idx == search_idx:
+                    break
+                    
+                pt_dx = self.samples[next_idx][0] - self.samples[search_idx][0]
+                pt_dy = self.samples[next_idx][1] - self.samples[search_idx][1]
+                dist_accum += math.hypot(pt_dx, pt_dy)
+                search_idx = next_idx
+                
+            goal_idx = search_idx
 
             # Extract geometric poses from the map data
             tx, ty, tth = self.samples[self.idx][0], self.samples[self.idx][1], self.samples[self.idx][2]
@@ -584,6 +596,13 @@ class VisualPoseLocaliser(object):
             proj_yaw = _wrap(self.ryaw + yaw_corr)
             reactive_gx = self.rx + local_x * math.cos(proj_yaw) - local_y * math.sin(proj_yaw)
             reactive_gy = self.ry + local_x * math.sin(proj_yaw) + local_y * math.cos(proj_yaw)
+            
+            # Numerically stabilize terminal parking: prevent explosion of dy / L^2
+            dist_to_goal = math.hypot(reactive_gx - self.rx, reactive_gy - self.ry)
+            if dist_to_goal < 0.20 and not self._finished:
+                scale = 0.20 / max(dist_to_goal, 0.01)
+                reactive_gx = self.rx + (reactive_gx - self.rx) * scale
+                reactive_gy = self.ry + (reactive_gy - self.ry) * scale
 
             # 4. Target heading preserves the geometric turn rate of the curve
             target_heading = _wrap(proj_yaw + _wrap(gth - tth))
