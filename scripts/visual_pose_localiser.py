@@ -298,10 +298,12 @@ class VisualPoseLocaliser(object):
                 if orb_kp is not None:
                     n_orb_loaded += 1
 
-                # 7-tuple: (x, y, yaw, desc_f32, orb_kp, orb_des, gray_full)
                 # Store the pristine full-resolution gray image to guarantee high-quality ORB features
+                # CRITICAL: Crop the ceiling out so ORB only tracks floor features (avoids zero-parallax failure)
                 gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-                samples.append((x, y, yaw, desc, orb_kp, orb_des, gray_full))
+                top_mask = int(gray_full.shape[0] * self.sky_mask_ratio)
+                cropped_gray_full = gray_full[top_mask:, :]
+                samples.append((x, y, yaw, desc, orb_kp, orb_des, cropped_gray_full))
             except Exception as e:
                 rospy.logwarn('[visual_pose_localiser] Skipping sample %s (%s)', pose_path, str(e))
 
@@ -325,10 +327,13 @@ class VisualPoseLocaliser(object):
             self.current_img_stamp = msg.header.stamp
 
             # Retain the full-resolution uncompressed image exclusively for LK ORB feature detection
-            self.current_gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            # CRITICAL: Crop the ceiling out identically to keyframe handling
+            raw_gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            top_mask = int(raw_gray.shape[0] * self.sky_mask_ratio)
+            self.current_gray_full = raw_gray[top_mask:, :]
             
             # Build uint8 gray thumbnail for LK speed tracking
-            gray_small = cv2.resize(self.current_gray_full, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
+            gray_small = cv2.resize(raw_gray, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
             self.current_gray_u8 = gray_small
 
             # Feed LK tracker every incoming frame (maintains optical flow state)
