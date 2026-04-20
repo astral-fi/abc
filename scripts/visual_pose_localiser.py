@@ -547,7 +547,6 @@ class VisualPoseLocaliser(object):
                 continue
 
             self._advance_if_reached()
-            self._skip_ahead_if_goal_behind()
 
             yaw_corr, dx, corr = self._visual_update()
 
