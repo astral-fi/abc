@@ -292,9 +292,13 @@ class VisualPoseLocaliser(object):
                 if orb_kp is not None:
                     n_orb_loaded += 1
 
-                # 6-tuple: (x, y, yaw, desc_f32, orb_kp, orb_des)
-                # orb_kp / orb_des may be None — _visual_update handles this.
-                samples.append((x, y, yaw, desc, orb_kp, orb_des))
+                # 7-tuple: (x, y, yaw, desc_f32, orb_kp, orb_des, gray_small)
+                # Always save gray_small so match_to_keyframe has an uncorrupted image
+                gray_small_fallback = cv2.cvtColor(
+                    cv2.resize(bgr, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA),
+                    cv2.COLOR_BGR2GRAY
+                )
+                samples.append((x, y, yaw, desc, orb_kp, orb_des, gray_small_fallback))
             except Exception as e:
                 rospy.logwarn('[visual_pose_localiser] Skipping sample %s (%s)', pose_path, str(e))
 
@@ -483,14 +487,9 @@ class VisualPoseLocaliser(object):
 
         if self.use_lk_hybrid and self._lk_tracker is not None \
                 and self.current_gray_u8 is not None:
-            # teach_sample is now a 6-tuple (x,y,yaw,desc,orb_kp,orb_des);
-            # for match_to_keyframe we only need the gray image of the keyframe.
-            # Reconstruct a uint8 gray from the stored float32 descriptor:
-            teach_gray_u8 = np.clip(
-                (teach_desc - teach_desc.min()) /
-                max(teach_desc.max() - teach_desc.min(), 1e-6) * 255.0,
-                0, 255,
-            ).astype(np.uint8)
+                
+            # Use raw uncorrupted uint8 image which is stored at index 6
+            teach_gray_u8 = teach_sample[6]
 
             lk_dx, lk_confidence = self._lk_tracker.match_to_keyframe(
                 self.current_gray_u8, teach_gray_u8
@@ -561,20 +560,22 @@ class VisualPoseLocaliser(object):
             else:
                 goal_idx = min(goal_idx + self.lookahead_steps, len(self.samples) - 1)
 
-            # samples are 6-tuples (x, y, yaw, desc, orb_kp, orb_des)
-            gx, gy, gth = self.samples[goal_idx][0], \
-                          self.samples[goal_idx][1], \
-                          self.samples[goal_idx][2]
+            # Extract geometric poses from the map data
+            tx, ty, tth = self.samples[self.idx][0], self.samples[self.idx][1], self.samples[self.idx][2]
+            gx, gy, gth = self.samples[goal_idx][0], self.samples[goal_idx][1], self.samples[goal_idx][2]
                           
             # CRITICAL FIX: The base controller compares the goal to current odometry to steer.
-            # JetRacer skid-steer odometry drifts massively in YAW within 1 second. 
-            # If we send absolute `gth` from the file, the controller will swerve violently
-            # to correct a "fake" heading discrepancy. 
-            # Instead, we construct a purely reactive local goal anchored to the current 
-            # drifted odometry using ONLY the visual correction (`yaw_corr`).
+            # By calculating the *geometric shape* of the curved path (vector from tx to gx),
+            # and mapping it identically relative to the robot's physical drifted position + yaw_corr,
+            # we beautifully trace curves WITHOUT suffering from the massive absolute odometry drift!
 
-            tx, ty = self.samples[self.idx][0], self.samples[self.idx][1]
-            lookahead_dist = math.hypot(gx - tx, gy - ty)
+            # 1. Find relative vector in the teach run absolute frame
+            vx = gx - tx
+            vy = gy - ty
+            
+            # 2. Transform vector to the LOCAL coordinate frame of the teach waypoint
+            local_x = vx * math.cos(tth) + vy * math.sin(tth)
+            local_y = -vx * math.sin(tth) + vy * math.cos(tth)
             
             if not self.loop_route and self.idx == len(self.samples) - 1:
                 # We have reached the absolute final visual waypoint for the first time.
@@ -582,12 +583,13 @@ class VisualPoseLocaliser(object):
                 rospy.loginfo('[visual_pose_localiser] Mission Complete! Latching parking state.')
                 continue
                 
-            if lookahead_dist < 0.15:
-                lookahead_dist = 0.20
+            # 3. Project this local road geometry out from the robot's currently perceived heading
+            proj_yaw = _wrap(self.ryaw + yaw_corr)
+            reactive_gx = self.rx + local_x * math.cos(proj_yaw) - local_y * math.sin(proj_yaw)
+            reactive_gy = self.ry + local_x * math.sin(proj_yaw) + local_y * math.cos(proj_yaw)
 
-            target_heading = _wrap(self.ryaw + yaw_corr)
-            reactive_gx = self.rx + lookahead_dist * math.cos(target_heading)
-            reactive_gy = self.ry + lookahead_dist * math.sin(target_heading)
+            # 4. Target heading preserves the geometric turn rate of the curve
+            target_heading = _wrap(proj_yaw + _wrap(gth - tth))
 
             msg = Pose2D()
             msg.x = reactive_gx
