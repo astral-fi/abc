@@ -332,7 +332,7 @@ class VisualPoseLocaliser(object):
     def _nearest_index(self):
         best_i = 0
         best_d2 = 1e18
-        for i, (x, y, _, _) in enumerate(self.samples):
+        for i, (x, y, _, _, _, _) in enumerate(self.samples):
             dx = x - self.rx
             dy = y - self.ry
             d2 = dx * dx + dy * dy
@@ -401,7 +401,7 @@ class VisualPoseLocaliser(object):
                 if cand >= len(self.samples):
                     break
 
-            gx, gy, _, _ = self.samples[cand]
+            gx, gy = self.samples[cand][0], self.samples[cand][1]
             b = abs(self._bearing_to_point(gx, gy))
             if b < best_abs:
                 best_abs = b
@@ -413,7 +413,7 @@ class VisualPoseLocaliser(object):
             self.idx = best_idx
 
     def _advance_if_reached(self):
-        gx, gy, _, _ = self.samples[self.idx]
+        gx, gy = self.samples[self.idx][0], self.samples[self.idx][1]
         dist = math.hypot(gx - self.rx, gy - self.ry)
         if dist < self.goal_radius:
             if self.loop_route:
