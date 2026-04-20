@@ -127,7 +127,8 @@ class VisualPoseLocaliser(object):
         self.ry = 0.0
         self.ryaw = 0.0
         self.current_desc = None
-        self.current_gray_u8 = None   # uint8 gray fed to LK tracker
+        self.current_gray_u8 = None   # uint8 resized (115x44) for LK speed tracking
+        self.current_gray_full = None # uint8 full res for exact ORB keyframe matching
         self.current_img_stamp = None
         self.idx = 0
         self._last_correction_source = 'none'  # 'lk' or 'ncc'
@@ -292,13 +293,10 @@ class VisualPoseLocaliser(object):
                 if orb_kp is not None:
                     n_orb_loaded += 1
 
-                # 7-tuple: (x, y, yaw, desc_f32, orb_kp, orb_des, gray_small)
-                # Always save gray_small so match_to_keyframe has an uncorrupted image
-                gray_small_fallback = cv2.cvtColor(
-                    cv2.resize(bgr, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA),
-                    cv2.COLOR_BGR2GRAY
-                )
-                samples.append((x, y, yaw, desc, orb_kp, orb_des, gray_small_fallback))
+                # 7-tuple: (x, y, yaw, desc_f32, orb_kp, orb_des, gray_full)
+                # Store the pristine full-resolution gray image to guarantee high-quality ORB features
+                gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                samples.append((x, y, yaw, desc, orb_kp, orb_des, gray_full))
             except Exception as e:
                 rospy.logwarn('[visual_pose_localiser] Skipping sample %s (%s)', pose_path, str(e))
 
@@ -321,12 +319,11 @@ class VisualPoseLocaliser(object):
             self.current_desc = self._preprocess(bgr)
             self.current_img_stamp = msg.header.stamp
 
-            # Build uint8 gray for LK tracker (separate from NCC float32 desc)
-            gray_small = cv2.cvtColor(
-                cv2.resize(bgr, (self.resize_w, self.resize_h),
-                           interpolation=cv2.INTER_AREA),
-                cv2.COLOR_BGR2GRAY,
-            )
+            # Retain the full-resolution uncompressed image exclusively for LK ORB feature detection
+            self.current_gray_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            
+            # Build uint8 gray thumbnail for LK speed tracking
+            gray_small = cv2.resize(self.current_gray_full, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
             self.current_gray_u8 = gray_small
 
             # Feed LK tracker every incoming frame (maintains optical flow state)
@@ -486,20 +483,20 @@ class VisualPoseLocaliser(object):
         lk_confidence = 0.0
 
         if self.use_lk_hybrid and self._lk_tracker is not None \
-                and self.current_gray_u8 is not None:
+                and self.current_gray_full is not None:
                 
-            # Use raw uncorrupted uint8 image which is stored at index 6
-            teach_gray_u8 = teach_sample[6]
+            # Use raw uncorrupted FULL RESOLUTION uint8 image stored at index 6
+            teach_gray_full = teach_sample[6]
 
             lk_dx, lk_confidence = self._lk_tracker.match_to_keyframe(
-                self.current_gray_u8, teach_gray_u8
+                self.current_gray_full, teach_gray_full
             )
 
             if lk_dx is not None and lk_confidence >= self.lk_confidence_threshold:
                 # LK succeeded: convert pixel offset to yaw correction
-                width_px = float(self.current_gray_u8.shape[1])
+                full_width_px = float(self.current_gray_full.shape[1])
                 yaw_corr = self.heading_sign * self.heading_gain * \
-                    (lk_dx / width_px) * self.image_fov_rad
+                    (lk_dx / full_width_px) * self.image_fov_rad
                 yaw_corr = _clamp(yaw_corr,
                                   -self.max_heading_correction_rad,
                                   self.max_heading_correction_rad)
