@@ -91,6 +91,9 @@ class VisualPoseLocaliser(object):
         self.resize_h = int(rospy.get_param('/image_resize_height', rospy.get_param('~image_resize_height', 44)))
         self.image_fov_deg = float(rospy.get_param('/image_field_of_view_width_deg', 160.0))
         self.image_fov_rad = math.radians(self.image_fov_deg)
+        
+        # Mask out the ceiling to prevent LK ORB tracker from tracking zero-parallax distant features
+        self.sky_mask_ratio = float(rospy.get_param('~sky_mask_ratio', 0.20))
 
         # ── LK hybrid correction params (all prefixed lk_) ──────────────────
         # ~use_lk_hybrid: enable LK-first / NCC-fallback mode.
