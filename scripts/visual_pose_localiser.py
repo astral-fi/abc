@@ -551,12 +551,27 @@ class VisualPoseLocaliser(object):
             gx, gy, gth = self.samples[goal_idx][0], \
                           self.samples[goal_idx][1], \
                           self.samples[goal_idx][2]
-            gth = _wrap(gth + yaw_corr)
+                          
+            # CRITICAL FIX: The base controller compares the goal to current odometry to steer.
+            # JetRacer skid-steer odometry drifts massively in YAW within 1 second. 
+            # If we send absolute `gth` from the file, the controller will swerve violently
+            # to correct a "fake" heading discrepancy. 
+            # Instead, we construct a purely reactive local goal anchored to the current 
+            # drifted odometry using ONLY the visual correction (`yaw_corr`).
+
+            tx, ty = self.samples[self.idx][0], self.samples[self.idx][1]
+            lookahead_dist = math.hypot(gx - tx, gy - ty)
+            if lookahead_dist < 0.15:
+                lookahead_dist = 0.20
+
+            target_heading = _wrap(self.ryaw + yaw_corr)
+            reactive_gx = self.rx + lookahead_dist * math.cos(target_heading)
+            reactive_gy = self.ry + lookahead_dist * math.sin(target_heading)
 
             msg = Pose2D()
-            msg.x = gx
-            msg.y = gy
-            msg.theta = gth
+            msg.x = reactive_gx
+            msg.y = reactive_gy
+            msg.theta = target_heading
             self.goal_pub.publish(msg)
 
             # ── Debug topic: JSON-formatted correction diagnostics ──────────
