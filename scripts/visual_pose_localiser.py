@@ -452,9 +452,11 @@ class VisualPoseLocaliser(object):
                 best_corr = c
                 best_i = i
 
-        # Always advance self.idx to the best match in the search window,
-        # regardless of NCC quality.  Heading correction is a separate gate
-        # (corr_threshold below) — decoupling progress from image quality.
+        if best_corr < self.corr_threshold:
+            self._last_correction_source = 'none'
+            self._last_lk_confidence     = 0.0
+            return 0.0, 0.0, best_corr
+
         # Bound sudden index jumps for stability
         delta = best_i - self.idx
         if self.loop_route:
@@ -467,15 +469,11 @@ class VisualPoseLocaliser(object):
         delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
         if self.loop_route:
             self.idx = (self.idx + delta) % len(self.samples)
+            
         else:
             self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
 
         # ── Yaw correction: LK-first, NCC-fallback ──────────────────────────
-        # Gate heading correction on image quality; index advance already done.
-        if best_corr < self.corr_threshold:
-            self._last_correction_source = 'none'
-            self._last_lk_confidence     = 0.0
-            return 0.0, 0.0, best_corr
 
         teach_sample = self.samples[self.idx]
         teach_desc   = teach_sample[3]
