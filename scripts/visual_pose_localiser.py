@@ -535,7 +535,21 @@ class VisualPoseLocaliser(object):
             self.idx = self._nearest_index()
             rospy.loginfo('[visual_pose_localiser] Starting from nearest index %d', self.idx)
 
+        self._finished = False
+
         while not rospy.is_shutdown():
+            if self._finished:
+                # Mission permanently complete. Halt and hold position without re-evaluating vision.
+                msg = Pose2D()
+                msg.x = self.rx
+                msg.y = self.ry
+                msg.theta = self.ryaw  # Match current yaw exactly so there is 0 heading error
+                self.goal_pub.publish(msg)
+                
+                rospy.loginfo_throttle(2.0, '[visual_pose_localiser] Reached end of route! Holding position.')
+                rate.sleep()
+                continue
+
             self._advance_if_reached()
             self._skip_ahead_if_goal_behind()
 
@@ -563,10 +577,12 @@ class VisualPoseLocaliser(object):
             lookahead_dist = math.hypot(gx - tx, gy - ty)
             
             if not self.loop_route and self.idx == len(self.samples) - 1:
-                # We have reached the absolute final visual waypoint. 
-                # Collapse the lookahead to 0.0 so the robot physically parks here.
-                lookahead_dist = 0.0
-            elif lookahead_dist < 0.15:
+                # We have reached the absolute final visual waypoint for the first time.
+                self._finished = True
+                rospy.loginfo('[visual_pose_localiser] Mission Complete! Latching parking state.')
+                continue
+                
+            if lookahead_dist < 0.15:
                 lookahead_dist = 0.20
 
             target_heading = _wrap(self.ryaw + yaw_corr)
