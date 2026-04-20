@@ -561,7 +561,12 @@ class VisualPoseLocaliser(object):
 
             tx, ty = self.samples[self.idx][0], self.samples[self.idx][1]
             lookahead_dist = math.hypot(gx - tx, gy - ty)
-            if lookahead_dist < 0.15:
+            
+            if not self.loop_route and self.idx == len(self.samples) - 1:
+                # We have reached the absolute final visual waypoint. 
+                # Collapse the lookahead to 0.0 so the robot physically parks here.
+                lookahead_dist = 0.0
+            elif lookahead_dist < 0.15:
                 lookahead_dist = 0.20
 
             target_heading = _wrap(self.ryaw + yaw_corr)
