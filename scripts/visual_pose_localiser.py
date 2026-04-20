@@ -611,26 +611,46 @@ class VisualPoseLocaliser(object):
                 
             goal_idx = search_idx
 
-            # Extract geometric poses from the map data
-            tx, ty, tth = self.samples[self.idx][0], self.samples[self.idx][1], self.samples[self.idx][2]
-            gx, gy, gth = self.samples[goal_idx][0], self.samples[goal_idx][1], self.samples[goal_idx][2]
+            # Extract the raw geometrical X, Y coordinates from the mapped waypoints
+            tx, ty = self.samples[self.idx][0], self.samples[self.idx][1]
+            gx, gy = self.samples[goal_idx][0], self.samples[goal_idx][1]
                           
-            # CRITICAL FIX: To prevent "long wide turns" (understeering) on skid-steer JetRacers:
-            # DO NOT mathematically project a 2D mapping (local_x) which relies on drifted ryaw orientations.
-            # Instead, we use "Feed-Forward Purely Reactive" logic:
-            # 1. Take the robot's drifted heading (self.ryaw)
-            # 2. Add visual correction (yaw_corr)
-            # 3. Add the natural curve of the recorded track directly (gth - tth)
+            # CRITICAL FIX: The recorded map orientations (`tth`, `gth`) are completely corrupted because 
+            # the JetRacer skid-steered violently during the teaching phase! 
+            # We strictly bypass them and calculate the 'True Track Heading' from the literal (x,y) curve geometry!
             
-            curve_feedforward = _wrap(gth - tth)
-            proj_yaw = _wrap(self.ryaw + yaw_corr + curve_feedforward)
+            # 1. Compute True Taught Path Heading (true_tth) from adjacent waypoint deltas
+            next_idx = (self.idx + 1) % len(self.samples) if self.loop_route else min(self.idx + 1, len(self.samples) - 1)
+            t_dx = self.samples[next_idx][0] - tx
+            t_dy = self.samples[next_idx][1] - ty
+            true_tth = math.atan2(t_dy, t_dx) if (abs(t_dx) > 0.001 or abs(t_dy) > 0.001) else self.samples[self.idx][2]
             
-            lookahead_radius = max(dist_accum, 0.25)
+            # 2. Extract the relative forward and lateral shifts to the future goal point
+            vx = gx - tx
+            vy = gy - ty
+            local_x = vx * math.cos(true_tth) + vy * math.sin(true_tth)
+            local_y = -vx * math.sin(true_tth) + vy * math.cos(true_tth)
             
+            # 3. Project this geometrically flawless arc out from the robot's visually-corrected nose
+            # We explicitly enforce a strong heading gain of 1.0 here for pure coordinate rotation!
+            true_visual_yaw = _wrap(self.ryaw + (dx / float(self.resize_w)) * self.image_fov_rad * self.heading_sign)
+            
+            reactive_gx = self.rx + local_x * math.cos(true_visual_yaw) - local_y * math.sin(true_visual_yaw)
+            reactive_gy = self.ry + local_x * math.sin(true_visual_yaw) + local_y * math.cos(true_visual_yaw)
+            
+            # Numerically stabilize terminal parking string natively to prevent endless twitching
+            dist_to_goal = math.hypot(reactive_gx - self.rx, reactive_gy - self.ry)
+            if dist_to_goal < 0.20 and not self._finished:
+                scale = 0.20 / max(dist_to_goal, 0.01)
+                reactive_gx = self.rx + (reactive_gx - self.rx) * scale
+                reactive_gy = self.ry + (reactive_gy - self.ry) * scale
+            
+            # 4. Map the final coordinates directly
             msg = Pose2D()
-            msg.x = self.rx + lookahead_radius * math.cos(proj_yaw)
-            msg.y = self.ry + lookahead_radius * math.sin(proj_yaw)
-            msg.theta = proj_yaw
+            msg.x = reactive_gx
+            msg.y = reactive_gy
+            # For controller blend stabilization at the end
+            msg.theta = true_visual_yaw
             
             # Numerically stabilize terminal parking: prevent coasting past finish
             if not self.loop_route and self.idx >= len(self.samples) - 2:
