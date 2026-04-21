@@ -600,8 +600,10 @@ class VisualPoseLocaliser(object):
             # We strictly discard all topological map geometry and rely on a Purely Reactive visual projection!
             # We compute the exact physical angle of the path from the camera (gain=1.0) and place the carrot there.
 
-            # Determine the exact angular offset from the camera's perspective
-            true_visual_yaw = _wrap(self.ryaw + (dx / float(self.resize_w)) * self.image_fov_rad * self.heading_sign)
+            # Determine the exact physical angular offset from the camera's perspective.
+            # _visual_update correctly handles resolution-scaling internally and clamps the output.
+            # We divide out the artificial P-Controller `heading_gain` dampener to restore the TRUE Physical (gain=1.0) matrix angle.
+            true_visual_yaw = _wrap(self.ryaw + (yaw_corr / max(self.heading_gain, 1e-6)))
             
             # Place the goal dynamically far enough ahead to prevent mathematical denominator explosion in Pure Pursuit
             lookahead_radius = 0.35
