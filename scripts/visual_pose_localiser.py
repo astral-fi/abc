@@ -593,70 +593,33 @@ class VisualPoseLocaliser(object):
 
             yaw_corr, dx, corr = self._visual_update()
 
-            # GEOMETRIC GOAL SEARCH: Lookahead steps is often too short (e.g. 0.05m).
-            # This causes massive numeric explosion in the Pure Pursuit controller's 
-            # curvature calculation (L^2 denominator). We physically search forward.
-            search_idx = self.idx
-            dist_accum = 0.0
-            
-            while dist_accum < 0.35:  # ensure lookahead vector is geometrically stable
-                next_idx = (search_idx + 1) % len(self.samples) if self.loop_route else min(search_idx + 1, len(self.samples) - 1)
-                if next_idx == search_idx:
-                    break
-                    
-                pt_dx = self.samples[next_idx][0] - self.samples[search_idx][0]
-                pt_dy = self.samples[next_idx][1] - self.samples[search_idx][1]
-                dist_accum += math.hypot(pt_dx, pt_dy)
-                search_idx = next_idx
-                
-            goal_idx = search_idx
+            # CRITICAL FIX: All map orientations (tth, gth) and even velocity vectors (delta_x) are physically corrupted 
+            # relative to the camera due to heavy wheel-slip and slip-angles during the teach run.
+            # Using them causes mathematically hallucinated understeering and U-turns.
+            # 
+            # We strictly discard all topological map geometry and rely on a Purely Reactive visual projection!
+            # We compute the exact physical angle of the path from the camera (gain=1.0) and place the carrot there.
 
-            # Extract the raw geometrical X, Y coordinates from the mapped waypoints
-            tx, ty = self.samples[self.idx][0], self.samples[self.idx][1]
-            gx, gy = self.samples[goal_idx][0], self.samples[goal_idx][1]
-                          
-            # CRITICAL FIX: The recorded map orientations (`tth`, `gth`) are completely corrupted because 
-            # the JetRacer skid-steered violently during the teaching phase! 
-            # We strictly bypass them and calculate the 'True Track Heading' from the literal (x,y) curve geometry!
-            
-            # 1. Compute True Taught Path Heading (true_tth) from adjacent waypoint deltas
-            next_idx = (self.idx + 1) % len(self.samples) if self.loop_route else min(self.idx + 1, len(self.samples) - 1)
-            t_dx = self.samples[next_idx][0] - tx
-            t_dy = self.samples[next_idx][1] - ty
-            true_tth = math.atan2(t_dy, t_dx) if (abs(t_dx) > 0.001 or abs(t_dy) > 0.001) else self.samples[self.idx][2]
-            
-            # 2. Extract the relative forward and lateral shifts to the future goal point
-            vx = gx - tx
-            vy = gy - ty
-            local_x = vx * math.cos(true_tth) + vy * math.sin(true_tth)
-            local_y = -vx * math.sin(true_tth) + vy * math.cos(true_tth)
-            
-            # 3. Project this geometrically flawless arc out from the robot's visually-corrected nose
-            # We explicitly enforce a strong heading gain of 1.0 here for pure coordinate rotation!
+            # Determine the exact angular offset from the camera's perspective
             true_visual_yaw = _wrap(self.ryaw + (dx / float(self.resize_w)) * self.image_fov_rad * self.heading_sign)
             
-            reactive_gx = self.rx + local_x * math.cos(true_visual_yaw) - local_y * math.sin(true_visual_yaw)
-            reactive_gy = self.ry + local_x * math.sin(true_visual_yaw) + local_y * math.cos(true_visual_yaw)
+            # Place the goal dynamically far enough ahead to prevent mathematical denominator explosion in Pure Pursuit
+            lookahead_radius = 0.35
             
-            # Numerically stabilize terminal parking string natively to prevent endless twitching
-            dist_to_goal = math.hypot(reactive_gx - self.rx, reactive_gy - self.ry)
-            if dist_to_goal < 0.20 and not self._finished:
-                scale = 0.20 / max(dist_to_goal, 0.01)
-                reactive_gx = self.rx + (reactive_gx - self.rx) * scale
-                reactive_gy = self.ry + (reactive_gy - self.ry) * scale
+            # Project the reactive target cleanly off the robot's physical visual nose
+            reactive_gx = self.rx + lookahead_radius * math.cos(true_visual_yaw)
+            reactive_gy = self.ry + lookahead_radius * math.sin(true_visual_yaw)
             
-            # 4. Map the final coordinates directly
-            msg = Pose2D()
-            msg.x = reactive_gx
-            msg.y = reactive_gy
-            # For controller blend stabilization at the end
-            msg.theta = true_visual_yaw
-            
-            # Numerically stabilize terminal parking: prevent coasting past finish
+            # Mission permanently complete check
             if not self.loop_route and self.idx >= len(self.samples) - 2:
                 # We have reached the absolute final visual waypoint
                 self._finished = True
                 rospy.loginfo('[visual_pose_localiser] Mission Complete! Latching parking state.')
+                
+            msg = Pose2D()
+            msg.x = reactive_gx
+            msg.y = reactive_gy
+            msg.theta = true_visual_yaw
             self.goal_pub.publish(msg)
 
             # ── Debug topic: JSON-formatted correction diagnostics ──────────
@@ -668,7 +631,7 @@ class VisualPoseLocaliser(object):
                 'stamp':          self.current_img_stamp.to_sec()
                                   if self.current_img_stamp else 0.0,
                 'keyframe_idx':   self.idx,
-                'goal_idx':       goal_idx,
+                'goal_idx':       -1,
                 'source':         self._last_correction_source,
                 'lk_confidence':  round(self._last_lk_confidence, 4),
                 'lk_flow_speed':  round(lk_speed, 4),
@@ -680,9 +643,9 @@ class VisualPoseLocaliser(object):
 
             rospy.loginfo_throttle(
                 1.0,
-                '[visual_pose_localiser] idx=%d goal=%d corr=%.3f '
+                '[visual_pose_localiser] idx=%d goal=-1 corr=%.3f '
                 'dx=%.2fpx yaw_corr=%.2fdeg src=%s lk_conf=%.2f lk_spd=%.2f',
-                self.idx, goal_idx, corr, dx,
+                self.idx, corr, dx,
                 math.degrees(yaw_corr),
                 self._last_correction_source,
                 self._last_lk_confidence,
