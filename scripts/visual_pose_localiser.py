@@ -201,20 +201,18 @@ class VisualPoseLocaliser(object):
         return x, y, yaw
 
     def _preprocess(self, bgr):
+        """Convert *bgr* to a normalised float32 NCC descriptor."""
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         if self.resize_w > 0 and self.resize_h > 0:
-            gray = cv2.resize(gray, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
-
-        img = gray.astype(np.float32) / 255.0
-
-        # Local contrast normalization (robust to lighting change)
+            gray = cv2.resize(gray, (self.resize_w, self.resize_h),
+                              interpolation=cv2.INTER_AREA)
+        img  = gray.astype(np.float32) / 255.0
         blur = cv2.GaussianBlur(img, (0, 0), 1.2)
         norm = img - blur
-        std = float(np.std(norm))
+        std  = float(np.std(norm))
         if std < 1e-6:
             std = 1.0
-        norm = norm / std
-        return norm
+        return norm / std
 
     def _resolve_run_dir(self, path):
         path = os.path.expanduser(path)
@@ -529,14 +527,22 @@ class VisualPoseLocaliser(object):
                 if delta > n // 2: delta -= n
                 elif delta < -n // 2: delta += n
 
-            delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
+            # Clamp: only allow FORWARD or NO movement.
+            # Backward jumps (delta < 0) occur when the NCC search window finds
+            # a higher-correlated match at an EARLIER keyframe during hard
+            # curve segments — this is almost always a false match because the
+            # apex scene is texture-similar to the approach frames.  Accepting
+            # a backward jump forces heading corrections against the wrong
+            # (earlier, less-curved) keyframe, dramatically under-steering.
+            delta = int(_clamp(delta, 0, self.max_index_jump))
             if self.loop_route:
                 self.idx = (self.idx + delta) % len(self.samples)
             else:
                 self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
-                
-            # If visual tracker snapped the index, reset the blind dead-reckoning residual
-            if delta != 0:
+
+            # If visual tracker snapped the index forward, reset the
+            # blind dead-reckoning residual to avoid double-advancing.
+            if delta > 0:
                 self.accum_dist = 0.0
 
         # ── 2. Yaw Correction: LK-first, NCC-fallback ─────────────────
@@ -573,8 +579,18 @@ class VisualPoseLocaliser(object):
                 rotation_valid = abs(lk_rot_rad) <= self._lk_max_rotation_rad
 
                 if self.lk_use_rotation and rotation_valid:
-                    yaw_from_rotation = self.heading_sign * self.heading_gain * \
-                        (-lk_rot_rad)   # negate: CCW scene rotation = CW robot drift
+                    # Sign derivation for estimateAffinePartial2D(src=current, dst=keyframe):
+                    # lk_rot_rad = atan2(M[1,0], M[0,0]).
+                    # Negative lk_rot_rad = affine maps current→keyframe with a CCW
+                    # rotation = current scene appears CW relative to keyframe =
+                    # camera has turned CW (right) = robot is on a LEFT curve /
+                    # drifted right → needs steer LEFT → yaw_corr should be POSITIVE.
+                    # With heading_sign=-1:
+                    #   yaw_from_rotation = -1 × gain × lk_rot_rad
+                    #                     = -1 × gain × (negative) = POSITIVE  ✓
+                    # DO NOT negate lk_rot_rad — the previous negation was inverting
+                    # the correction direction and fighting the offset signal.
+                    yaw_from_rotation = self.heading_sign * self.heading_gain * lk_rot_rad
                     # Weighted blend: rotation_weight × rot + (1-w) × offset
                     w = _clamp(self.lk_rotation_weight, 0.0, 1.0)
                     yaw_corr = w * yaw_from_rotation + (1.0 - w) * yaw_from_offset

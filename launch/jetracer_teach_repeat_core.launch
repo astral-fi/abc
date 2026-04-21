@@ -66,20 +66,24 @@
     Images are resized to this resolution before patch-normalisation,
     storage, and comparison.
 
-    115×44  — original QVPR paper default (Jetson Nano-safe at 20+ Hz).
-                Suitable for straight-line tracking only; gives 0.72 px/deg
-                horizontal resolution, which is too coarse to detect the
-                sub-2° drift occurring on gentle curves.
+    width  320 px — gives 2 px/deg horizontal resolution.
+    height 240 px — doubled from 120 to give 2× finer vertical resolution.
+      Rationale: in this lab environment the NCC keyframe matching is
+      confused by drawers/shelving that look identical at every position.
+      The discriminative scene content is the FLOOR (tile pattern, marks)
+      and CEILING (light positions).  A taller descriptor gives the
+      phase-correlate peak a finer vertical index into those regions,
+      reducing false-match probability between frames that share the same
+      drawer arrangement but have different floor/ceiling signatures.
 
-    320×120 — recommended for curve tracking.  Gives 2 px/deg horizontal
-                resolution so a 1° heading drift produces a clean 2-px
-                phase-correlate peak.  CPU cost on Jetson Nano is ~3× higher
-                but still achieves ≥ 10 Hz at the 15 Hz publish rate.
-                IMPORTANT: changing this value requires re-running the teach
-                phase so stored NCC descriptors match the new resolution.
+      CPU cost on Jetson Nano: ~5× the original 115×44 baseline but
+      still comfortably within the 10 Hz minimum at 15 Hz publish rate.
+
+    IMPORTANT: changing either dimension requires re-running the teach
+    phase so stored NCC descriptors match the new resolution.
   -->
   <param name="/image_resize_width"  value="320" />
-  <param name="/image_resize_height" value="120"  />
+  <param name="/image_resize_height" value="240" />
 
   <!--
     Patch normalisation kernel size for lighting robustness.
