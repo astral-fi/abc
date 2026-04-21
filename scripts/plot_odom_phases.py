@@ -32,10 +32,10 @@ import sys
 
 # ── Plotting — deferred import so headless import is possible ────────────────
 import matplotlib
-matplotlib.use('Agg')           # safe default; overridden below for interactive
+matplotlib.use('Agg')   # must be set BEFORE importing pyplot; Agg works headless
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
 from matplotlib.lines import Line2D
 import numpy as np
 
@@ -228,8 +228,10 @@ def make_plot(phases, out_png=None, show=True):
         sys.exit('ERROR: No valid CSV data to plot.')
 
     # ── Figure layout ─────────────────────────────────────────────────────────
+    # Use matplotlib.gridspec.GridSpec — available since matplotlib 1.x.
+    # (fig.add_gridspec was only added in 3.1 and is absent on Jetson Nano.)
     fig = plt.figure(figsize=(14, 13), facecolor='#0D0D1A')
-    gs  = fig.add_gridspec(
+    gs  = gridspec.GridSpec(
         3, 2,
         height_ratios=[3, 1.4, 1.4],
         hspace=0.40,
@@ -266,11 +268,9 @@ def make_plot(phases, out_png=None, show=True):
         _draw_path(ax_xy, d, COLOUR_VISUAL, PHASE_LABELS['visual'], lw=2.0)
 
     ax_xy.set_aspect('equal', adjustable='datalim')
-    ax_xy.legend(loc='upper left', framealpha=0.25, fontsize=9,
-                  labelcolor='white', facecolor='#222244',
-                  edgecolor='#444466')
 
-    # Extra legend: start/end markers
+    # Build combined legend with path lines + start/end markers.
+    # Avoid labelcolor= — added in matplotlib 3.2, absent on Jetson.
     legend_markers = [
         Line2D([0], [0], marker='o', color='white', label='Start',
                markersize=8, linestyle='None',
@@ -279,12 +279,15 @@ def make_plot(phases, out_png=None, show=True):
                markersize=8, linestyle='None',
                markeredgewidth=1.5, markeredgecolor='white'),
     ]
-    ax_xy.legend(
-        handles=ax_xy.get_legend_handles_labels()[0] + legend_markers,
-        labels=ax_xy.get_legend_handles_labels()[1] + ['Start', 'End'],
+    handles, labels = ax_xy.get_legend_handles_labels()
+    leg = ax_xy.legend(
+        handles=handles + legend_markers,
+        labels=labels + ['Start', 'End'],
         loc='upper left', framealpha=0.25, fontsize=9,
-        labelcolor='white', facecolor='#222244', edgecolor='#444466',
+        facecolor='#222244', edgecolor='#444466',
     )
+    for text in leg.get_texts():
+        text.set_color('white')
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 2: Cumulative distance vs elapsed time
@@ -301,9 +304,10 @@ def make_plot(phases, out_png=None, show=True):
                      linewidth=1.8,
                      label=PHASE_LABELS[name])
 
-    ax_dist.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                    labelcolor='white', facecolor='#222244',
-                    edgecolor='#444466')
+    leg = ax_dist.legend(loc='upper left', framealpha=0.20, fontsize=8,
+                         facecolor='#222244', edgecolor='#444466')
+    for text in leg.get_texts():
+        text.set_color('white')
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 3: Forward speed profile
@@ -322,9 +326,10 @@ def make_plot(phases, out_png=None, show=True):
                     alpha=0.85,
                     label=PHASE_LABELS[name])
 
-    ax_spd.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                   labelcolor='white', facecolor='#222244',
-                   edgecolor='#444466')
+    leg = ax_spd.legend(loc='upper left', framealpha=0.20, fontsize=8,
+                        facecolor='#222244', edgecolor='#444466')
+    for text in leg.get_texts():
+        text.set_color('white')
     ax_spd.set_ylim(bottom=0.0)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -365,9 +370,10 @@ def make_plot(phases, out_png=None, show=True):
                 color=c, fontsize=8, style='italic',
             )
 
-        ax_dev.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                       labelcolor='white', facecolor='#222244',
-                       edgecolor='#444466')
+        leg = ax_dev.legend(loc='upper left', framealpha=0.20, fontsize=8,
+                            facecolor='#222244', edgecolor='#444466')
+        for text in leg.get_texts():
+            text.set_color('white')
         ax_dev.set_ylim(bottom=0.0)
     else:
         ax_dev.text(0.5, 0.5,
@@ -393,10 +399,13 @@ def make_plot(phases, out_png=None, show=True):
         print('Saved: %s' % out_png)
 
     if show:
-        matplotlib.use('TkAgg')   # switch to interactive backend for display
-        plt.show()
-    else:
-        plt.close(fig)
+        # Backend cannot be switched after pyplot is imported — Agg is used.
+        # On Jetson (headless SSH), always pass --no-show and view the PNG instead.
+        try:
+            plt.show()
+        except Exception:
+            print('NOTE: Cannot display window (headless?). Use --no-show and open the PNG.')
+    plt.close(fig)
 
     return fig
 
