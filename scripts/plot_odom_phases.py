@@ -68,17 +68,18 @@ PHASE_COLOURS = {
 def _load_csv(path):
     """
     Load a CSV written by odom_phase_recorder and return a dict of
-    equal-length float lists:
-      {'elapsed_s': [...], 'x': [...], 'y': [...], 'yaw': [...],
-       'vx': [...], 'omega': [...]}
-    Missing velocity columns are filled with zeros for back-compat.
+    equal-length numpy float64 arrays:
+      {'elapsed_s': ..., 'x': ..., 'y': ..., 'yaw': ..., 'speed': ...}
+
+    'speed' is computed from finite differences of (x,y,elapsed_s) so
+    it works whether or not a 'vx' column is present in the CSV
+    (PoseWithCovarianceStamped has no twist field).
     """
     path = os.path.expanduser(path)
     if not os.path.isfile(path):
         return None
 
-    data = {'elapsed_s': [], 'x': [], 'y': [],
-            'yaw': [], 'vx': [], 'omega': []}
+    data = {'elapsed_s': [], 'x': [], 'y': [], 'yaw': []}
     try:
         with open(path, 'r') as fh:
             reader = csv.DictReader(fh)
@@ -88,8 +89,6 @@ def _load_csv(path):
                     data['x'].append(float(row['x']))
                     data['y'].append(float(row['y']))
                     data['yaw'].append(float(row.get('yaw', 0)))
-                    data['vx'].append(float(row.get('vx', 0)))
-                    data['omega'].append(float(row.get('omega', 0)))
                 except (KeyError, ValueError):
                     pass
     except Exception as e:
@@ -100,7 +99,18 @@ def _load_csv(path):
         return None
 
     # Convert to numpy for vectorised ops
-    return {k: np.asarray(v, dtype=np.float64) for k, v in data.items()}
+    out = {k: np.asarray(v, dtype=np.float64) for k, v in data.items()}
+
+    # Compute instantaneous speed from position finite differences [m/s]
+    dx  = np.diff(out['x'])
+    dy  = np.diff(out['y'])
+    dt  = np.diff(out['elapsed_s'])
+    dt[dt < 1e-6] = 1e-6          # guard against zero dt
+    spd = np.sqrt(dx**2 + dy**2) / dt
+    # Prepend first sample so length matches
+    out['speed'] = np.concatenate([[spd[0] if len(spd) else 0.0], spd])
+
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,8 +314,8 @@ def make_plot(phases, out_png=None, show=True):
 
     for name in available:
         d = phases[name]
-        # smooth vx with a rolling median-ish IIR
-        spd = np.abs(d['vx'])
+        # speed computed from |Δpos|/Δt in _load_csv (no twist field available)
+        spd = d['speed']
         ax_spd.plot(d['elapsed_s'], spd,
                     color=PHASE_COLOURS[name],
                     linewidth=1.4,

@@ -82,7 +82,7 @@ class OdomPhaseRecorder(object):
 
         self._fh     = open(out_path, 'w')
         self._writer = csv.writer(self._fh, lineterminator='\n')
-        self._writer.writerow(['elapsed_s', 'x', 'y', 'yaw', 'vx', 'omega'])
+        self._writer.writerow(['elapsed_s', 'x', 'y', 'yaw'])
 
         self._count = 0
         self._t0    = None
@@ -108,25 +108,22 @@ class OdomPhaseRecorder(object):
     # ── Callback ──────────────────────────────────────────────────────────────
 
     def _odom_cb(self, msg):
+        # PoseWithCovarianceStamped has only pose, no twist field.
         stamp = msg.header.stamp.to_sec()
         if self._t0 is None:
             self._t0 = stamp
 
-        q   = msg.pose.pose.orientation
+        q = msg.pose.pose.orientation
         _, _, yaw = tft.euler_from_quaternion([q.x, q.y, q.z, q.w])
 
-        x  = float(msg.pose.pose.position.x)
-        y  = float(msg.pose.pose.position.y)
-        vx = float(msg.twist.twist.linear.x)
-        om = float(msg.twist.twist.angular.z)
+        x = float(msg.pose.pose.position.x)
+        y = float(msg.pose.pose.position.y)
 
         self._writer.writerow([
             round(stamp - self._t0, 5),
             round(x,   5),
             round(y,   5),
             round(yaw, 6),
-            round(vx,  5),
-            round(om,  6),
         ])
         self._count += 1
 
