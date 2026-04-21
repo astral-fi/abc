@@ -100,7 +100,15 @@
     <param name="~max_skip_ahead"             value="200" />
     <param name="~loop_route"                 value="false" />
     <!--
-      LK hybrid params
+      ── NCC-only vs LK-hybrid mode ─────────────────────────────────────────
+      use_lk_hybrid: set to true to enable LK optical-flow keyframe matching
+        as the primary correction with NCC as fallback.
+        Set to false (current) to run PURE NCC-only mode for comparison / testing.
+    -->
+    <param name="~use_lk_hybrid" value="false" />
+
+    <!--
+      LK hybrid params (only active when use_lk_hybrid=true above)
       lk_confidence_threshold: lowered from 0.40 → 0.20 because at full
         resolution with 200 ORB features the partial-affine inlier ratio is
         typically 0.20–0.50 on textured indoor scenes.
