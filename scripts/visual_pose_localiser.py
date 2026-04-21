@@ -493,32 +493,28 @@ class VisualPoseLocaliser(object):
                 best_corr = c
                 best_i = i
 
-        if best_corr < self.corr_threshold:
-            self._last_correction_source = 'none'
-            self._last_lk_confidence     = 0.0
-            return 0.0, 0.0, best_corr
+        # ── 1. Topological Index Snapping (NCC Phase Correlate) ───────
+        # Only snap if NCC found a highly correlated match. If it failed due to 
+        # rotational variance on corners, we just blindly trust the open_loop index!
+        if best_corr >= self.corr_threshold:
+            # Bound sudden index jumps for stability
+            delta = best_i - self.idx
+            if self.loop_route:
+                n = len(self.samples)
+                if delta > n // 2: delta -= n
+                elif delta < -n // 2: delta += n
 
-        # Bound sudden index jumps for stability
-        delta = best_i - self.idx
-        if self.loop_route:
-            n = len(self.samples)
-            if delta > n // 2:
-                delta -= n
-            elif delta < -n // 2:
-                delta += n
+            delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
+            if self.loop_route:
+                self.idx = (self.idx + delta) % len(self.samples)
+            else:
+                self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
+                
+            # If visual tracker snapped the index, reset the blind dead-reckoning residual
+            if delta != 0:
+                self.accum_dist = 0.0
 
-        delta = int(_clamp(delta, -self.max_index_jump, self.max_index_jump))
-        if self.loop_route:
-            self.idx = (self.idx + delta) % len(self.samples)
-        else:
-            self.idx = int(_clamp(self.idx + delta, 0, len(self.samples) - 1))
-            
-        # If visual tracker snapped the index, reset the blind dead-reckoning residual
-        if delta != 0:
-            self.accum_dist = 0.0
-
-        # ── Yaw correction: LK-first, NCC-fallback ──────────────────────────
-
+        # ── 2. Yaw Correction: LK-first, NCC-fallback ─────────────────
         teach_sample = self.samples[self.idx]
         teach_desc   = teach_sample[3]
 
@@ -547,9 +543,15 @@ class VisualPoseLocaliser(object):
                 dx       = lk_dx
 
         if not used_lk:
-            # NCC fallback (original logic; always available)
-            yaw_corr, dx = self._estimate_yaw_error(teach_desc, self.current_desc)
-            lk_confidence = 0.0
+            # If LK fails, we can only safely use NCC if NCC itself passed!
+            if best_corr >= self.corr_threshold:
+                yaw_corr, dx = self._estimate_yaw_error(teach_desc, self.current_desc)
+                lk_confidence = 0.0
+            else:
+                # BOTH trackers failed! Abort visual correction this frame.
+                self._last_correction_source = 'none'
+                self._last_lk_confidence     = 0.0
+                return 0.0, 0.0, best_corr
 
         self._last_correction_source = 'lk' if used_lk else 'ncc'
         self._last_lk_confidence     = lk_confidence
