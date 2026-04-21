@@ -50,8 +50,8 @@ ALPHA_FILL    = 0.15
 
 PHASE_LABELS = {
     'teach':  'Teach',
-    'blind':  'Repeat — camera covered',
-    'visual': 'Repeat — camera active',
+    'blind':  'Repeat - camera covered',
+    'visual': 'Repeat - camera active',
 }
 
 PHASE_COLOURS = {
@@ -92,7 +92,7 @@ def _load_csv(path):
                 except (KeyError, ValueError):
                     pass
     except Exception as e:
-        print('WARNING: Could not load %s — %s' % (path, e))
+        print('WARNING: Could not load %s - %s' % (path, e))
         return None
 
     if not data['x']:
@@ -246,14 +246,14 @@ def make_plot(phases, out_png=None, show=True):
 
     # ── Title ─────────────────────────────────────────────────────────────────
     fig.suptitle(
-        'JetRacer Odometry — 3-Phase Comparison',
+        'JetRacer Odometry - 3-Phase Comparison',
         color='#E0E0FF', fontsize=16, fontweight='bold', y=0.97)
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 1: X-Y Trajectory
     # ═════════════════════════════════════════════════════════════════════════
     _style_ax(ax_xy, xlabel='X  (m)', ylabel='Y  (m)',
-              title='Top-Down Path  (● = start,  ■ = end)')
+              title='Top-Down Path  (circle=start, square=end)')
 
     if has_teach:
         d = phases['teach']
