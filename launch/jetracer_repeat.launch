@@ -68,15 +68,44 @@
     <param name="start_index" value="0"/>
     <param name="~publish_hz" value="15.0" />
       <param name="~lookahead_steps" value="2" />
-      <param name="~search_range" value="3" />
-      <param name="~corr_threshold" value="0.13" />
-      <param name="~max_index_jump" value="5" />
-      <param name="~heading_gain" value="0.3" />
-      <param name="~heading_sign" value="-1.0" />
-      <param name="~max_heading_correction_deg" value="10.0" />
+      <param name="~search_range"      value="3" />
+      <!--
+        corr_threshold: minimum NCC score to accept a visual correction.
+        Lowered to 0.08 (from 0.13) because at 320 px width the phase-
+        correlate peak is sharper and reliably exceeds 0.08 even on curves.
+      -->
+      <param name="~corr_threshold"     value="0.08" />
+      <param name="~max_index_jump"     value="5" />
+      <!--
+        heading_gain: P-gain applied to the raw pixel shift before it is
+        converted to a yaw correction.  Increased from 0.3 → 0.5 to make
+        the system more responsive on curves.  Re-tune downward if the
+        robot oscillates on straights.
+      -->
+      <param name="~heading_gain"       value="0.5" />
+      <param name="~heading_sign"       value="-1.0" />
+      <!--
+        max_heading_correction_deg: the absolute cap on yaw correction per
+        cycle.  Raised from 10° → 20° so the controller can issue the large
+        catch-up corrections needed when drift has accumulated on a curve.
+      -->
+      <param name="~max_heading_correction_deg" value="20.0" />
     <param name="~behind_skip_threshold_deg" value="85.0" />
-    <param name="~max_skip_ahead" value="200" />
-    <param name="~loop_route" value="false" />
+    <param name="~max_skip_ahead"             value="200" />
+    <param name="~loop_route"                 value="false" />
+    <!--
+      LK hybrid params
+      lk_confidence_threshold: lowered from 0.40 → 0.20 because at full
+        resolution with 200 ORB features the homography inlier ratio is
+        typically 0.20–0.50 on textured indoor scenes.
+      lk_use_rotation: true = use homography in-plane rotation angle as the
+        primary heading signal on curves (rotation-invariant, curve-safe).
+      lk_rotation_weight: 0.7 = 70% rotation + 30% dx offset blend.
+        Set to 1.0 for pure-rotation mode; 0.0 to disable and use dx only.
+    -->
+    <param name="~lk_confidence_threshold" value="0.20" />
+    <param name="~lk_use_rotation"         value="true" />
+    <param name="~lk_rotation_weight"      value="0.7" />
     <remap from="goal" to="/goal" />
   </node>
 

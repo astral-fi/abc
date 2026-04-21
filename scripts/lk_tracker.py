@@ -9,20 +9,26 @@ the JetRacer teach-repeat stack.
 No ROS imports — importable and testable without a ROS environment.
 Python 2/3 dual-compatible (uses __future__ imports throughout).
 
-Designed for the paper's native 115×44 image resolution on a Jetson Nano:
+Designed to operate at FULL camera resolution (e.g. 640×480 or 1280×720):
   - All heavy lifting delegated to OpenCV C++ (no per-pixel Python loops).
   - Vectorised numpy for all arithmetic.
   - CLAHE applied once per frame before any feature operation.
 
 Public API
 ----------
-  tracker = LKTracker(img_w=115, img_h=44)
+  tracker = LKTracker()          # resolution-agnostic; adapts to input shape
 
   # Feed the current live gray frame (uint8):
   flow_vecs, valid_mask = tracker.track(gray_uint8)
 
   # Match current frame against a stored keyframe gray:
-  offset_px, confidence = tracker.match_to_keyframe(curr_gray, kf_gray)
+  #   Returns (offset_px, rotation_rad, confidence)
+  #     offset_px    – horizontal pixel offset (positive = scene shifted RIGHT)
+  #     rotation_rad – in-plane rotation angle from homography H (radians)
+  #                    Use this for curve-correct heading correction instead of offset_px
+  #     confidence   – inlier ratio in [0, 1]; 0 on failure
+  #   On failure: (None, 0.0, 0.0)
+  offset_px, rotation_rad, confidence = tracker.match_to_keyframe(curr_gray, kf_gray)
 
   # Smoothed optical-flow magnitude (along-path speed proxy):
   speed = tracker.estimate_flow_speed()
@@ -30,37 +36,42 @@ Public API
 
 from __future__ import division, print_function
 
+import math
+
 import numpy as np
 import cv2
 
 
 # ---------------------------------------------------------------------------
-# Lucas-Kanade parameters
+# Lucas-Kanade parameters  (tuned for full-resolution images ≥ 320 px wide)
 # ---------------------------------------------------------------------------
-_LK_WIN_SIZE  = (15, 15)
-_LK_MAX_LEVEL = 2
-_LK_CRITERIA  = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+_LK_WIN_SIZE  = (21, 21)   # larger window handles perspective warp on curves
+_LK_MAX_LEVEL = 3           # one extra pyramid level for full-res input
+_LK_CRITERIA  = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.01)
 
 # Shi-Tomasi feature detection
-_ST_MAX_FEATURES   = 50
+_ST_MAX_FEATURES   = 200   # more features available at full resolution
 _ST_QUALITY        = 0.01
-_ST_MIN_DIST       = 5
+_ST_MIN_DIST       = 10    # pixels; scaled up for higher res
 
-# ORB parameters
-_ORB_N_FEATURES    = 50
+# ORB parameters  (full-res defaults; edgeThreshold must be ≥ patchSize)
+_ORB_N_FEATURES    = 200
+_ORB_EDGE_THRESH   = 31    # safe default — matches ORB internal patch
+_ORB_PATCH_SIZE    = 31
+_ORB_FAST_THRESH   = 10
 
 # Forward-backward error threshold for track validation (pixels)
-_FB_ERROR_THRESH   = 2.0
+_FB_ERROR_THRESH   = 3.0   # slightly relaxed for full-res input
 
 # Minimum valid tracked points before soft-reinit
-_MIN_TRACKED_PTS   = 15
+_MIN_TRACKED_PTS   = 20
 
 # CLAHE
 _CLAHE_CLIP_LIMIT  = 2.0
-_CLAHE_TILE_GRID   = (4, 4)
+_CLAHE_TILE_GRID   = (8, 8)   # coarser grid for full-res
 
 # RANSAC homography inlier distance (pixels)
-_RANSAC_THRESH     = 5.0
+_RANSAC_THRESH     = 3.0   # tighter at full resolution
 
 # IIR low-pass alpha for flow speed estimate
 _IIR_ALPHA         = 0.15
@@ -70,24 +81,30 @@ class LKTracker(object):
     """
     Lucas-Kanade optical flow tracker with ORB keyframe matching.
 
+    Resolution-agnostic: adapts to whatever image size is passed in.
+    The old ``img_w`` / ``img_h`` constructor arguments are retained for
+    backward compatibility but are now only used to scale ``_ST_MIN_DIST``
+    when explicitly provided.
+
     Parameters
     ----------
-    img_w : int
-        Expected image width in pixels (default 115).
-    img_h : int
-        Expected image height in pixels (default 44).
+    img_w : int or None
+        Hint for expected image width.  Pass None (default) to let the
+        tracker auto-detect from the first frame.
+    img_h : int or None
+        Hint for expected image height.  Pass None (default) to auto-detect.
     sky_fraction : float
-        Top fraction of the image to mask out during feature detection
-        (sky / ceiling rejection).  Default 0.20 (top 20 %).
+        Top fraction of the image to mask out during Shi-Tomasi detection.
+        Set to 0.0 if the caller already crops the sky externally (recommended).
     lk_flow_alpha : float
         IIR smoothing coefficient for ``estimate_flow_speed()``.
         Range (0, 1] — smaller = heavier smoothing.  Default 0.15.
     """
 
-    def __init__(self, img_w=115, img_h=44, sky_fraction=0.20,
+    def __init__(self, img_w=None, img_h=None, sky_fraction=0.0,
                  lk_flow_alpha=_IIR_ALPHA):
-        self.img_w         = int(img_w)
-        self.img_h         = int(img_h)
+        self.img_w         = img_w   # may be None (auto)
+        self.img_h         = img_h   # may be None (auto)
         self.sky_fraction  = float(sky_fraction)
         self._alpha        = float(lk_flow_alpha)
 
@@ -97,13 +114,12 @@ class LKTracker(object):
             tileGridSize=_CLAHE_TILE_GRID,
         )
 
-        # ORB detector (shared instance). Tuned for extremely small 115x44 images.
-        # Defaults (edgeThreshold=31) mathematically kill 100% of features on an image 44px tall.
+        # ORB detector — tuned for full-resolution images.
         self._orb = cv2.ORB_create(
             nfeatures=_ORB_N_FEATURES,
-            edgeThreshold=5,
-            patchSize=15,
-            fastThreshold=10
+            edgeThreshold=_ORB_EDGE_THRESH,
+            patchSize=_ORB_PATCH_SIZE,
+            fastThreshold=_ORB_FAST_THRESH,
         )
 
         # BFMatcher with cross-check (no ratio-test needed)
@@ -128,45 +144,56 @@ class LKTracker(object):
             gray_uint8 = gray_uint8.astype(np.uint8)
         return self._clahe.apply(gray_uint8)
 
-    def _sky_mask(self):
+    def _sky_mask(self, h, w):
         """
-        Build a uint8 mask that zeros out the top `sky_fraction` of the image.
-        Shi-Tomasi will only detect points where mask != 0.
-        Returns an array of shape (img_h, img_w) dtype uint8.
+        Build a uint8 mask that zeros out the top ``sky_fraction`` of the
+        image (shape h×w).  Shi-Tomasi only detects where mask != 0.
         """
-        mask = np.ones((self.img_h, self.img_w), dtype=np.uint8) * 255
-        sky_rows = int(round(self.img_h * self.sky_fraction))
+        mask = np.ones((h, w), dtype=np.uint8) * 255
+        sky_rows = int(round(h * self.sky_fraction))
         if sky_rows > 0:
             mask[:sky_rows, :] = 0
         return mask
+
+    def _to_uint8_gray(self, frame):
+        """Convert any input frame to uint8 grayscale."""
+        if frame.ndim == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame.copy()
+        if gray.dtype != np.uint8:
+            gray = np.clip(gray * 255.0, 0, 255).astype(np.uint8)
+        return gray
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def detect_features(self, gray_uint8):
+    def detect_features(self, clahe_gray):
         """
-        Detect Shi-Tomasi corner features, ignoring the top sky_fraction.
+        Detect Shi-Tomasi corner features, optionally ignoring the top
+        ``sky_fraction`` of the image.
 
         Parameters
         ----------
-        gray_uint8 : np.ndarray  shape (H, W)  dtype uint8
+        clahe_gray : np.ndarray  shape (H, W)  dtype uint8
             Already CLAHE-enhanced grayscale frame.
 
         Returns
         -------
-        pts : np.ndarray  shape (N, 1, 2)  dtype float32
-            Detected feature points, ready for ``cv2.calcOpticalFlowPyrLK``.
-            Returns None if no features found.
+        pts : np.ndarray  shape (N, 1, 2)  dtype float32  or  None
         """
-        enhanced = self._apply_clahe(gray_uint8)
-        mask     = self._sky_mask()
+        h, w = clahe_gray.shape[:2]
+        mask = self._sky_mask(h, w)
+
+        # Scale min-distance for the actual image width
+        min_dist = max(5, int(w * _ST_MIN_DIST / 320.0))  # reference: 320 px
 
         corners = cv2.goodFeaturesToTrack(
-            enhanced,
+            clahe_gray,
             maxCorners=_ST_MAX_FEATURES,
             qualityLevel=_ST_QUALITY,
-            minDistance=_ST_MIN_DIST,
+            minDistance=min_dist,
             mask=mask,
         )
         return corners  # (N,1,2) float32 or None
@@ -181,35 +208,20 @@ class LKTracker(object):
         Parameters
         ----------
         curr_frame : np.ndarray  shape (H, W) or (H, W, C)  uint8
-            Current camera frame.  Converted to gray internally.
+            Current camera frame.  Any resolution.  Converted to gray internally.
 
         Returns
         -------
         flow_vecs : np.ndarray  shape (N, 2)  float32  or  None
-            Displacement vectors (dx, dy) for each valid tracked point.
         valid_mask : np.ndarray  shape (N,)  bool  or  None
-            True for points that passed the FB check.
-
-        Side effects
-        ------------
-        Updates ``self._flow_vecs``, ``self._valid_mask``,
-        ``self._prev_gray``, ``self._prev_pts``, and
-        ``self._flow_speed_iir``.
         """
-        # Convert to uint8 gray
-        if curr_frame.ndim == 3:
-            curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        else:
-            curr_gray = curr_frame.copy()
-        if curr_gray.dtype != np.uint8:
-            curr_gray = np.clip(curr_gray * 255.0, 0, 255).astype(np.uint8)
-
+        curr_gray  = self._to_uint8_gray(curr_frame)
         curr_clahe = self._apply_clahe(curr_gray)
 
         # --- First frame or hard reinit ---
         if self._prev_gray is None or self._prev_pts is None:
-            self._prev_gray = curr_clahe
-            self._prev_pts  = self.detect_features(curr_clahe)
+            self._prev_gray  = curr_clahe
+            self._prev_pts   = self.detect_features(curr_clahe)
             self._flow_vecs  = None
             self._valid_mask = None
             return None, None
@@ -239,34 +251,30 @@ class LKTracker(object):
         )
 
         if prev_pts_back is None or status_bwd is None:
-            # Degenerate — accept forward result only
             fb_error = np.zeros(len(self._prev_pts), dtype=np.float32)
         else:
-            # FB error: L2 distance between original and round-tripped points
-            diff     = self._prev_pts - prev_pts_back          # (N,1,2)
+            diff     = self._prev_pts - prev_pts_back   # (N,1,2)
             fb_error = np.sqrt(
                 np.sum(diff ** 2, axis=2)
-            ).ravel()                                           # (N,)
+            ).ravel()                                    # (N,)
 
-        fwd_ok    = status_fwd.ravel().astype(bool)
-        bwd_ok    = (status_bwd.ravel().astype(bool)
-                     if prev_pts_back is not None else fwd_ok)
-        fb_ok     = fwd_ok & bwd_ok & (fb_error < _FB_ERROR_THRESH)
+        fwd_ok = status_fwd.ravel().astype(bool)
+        bwd_ok = (status_bwd.ravel().astype(bool)
+                  if prev_pts_back is not None else fwd_ok)
+        fb_ok  = fwd_ok & bwd_ok & (fb_error < _FB_ERROR_THRESH)
 
         # --- Flow vectors for valid points ---
-        n_valid   = int(np.sum(fb_ok))
+        n_valid = int(np.sum(fb_ok))
         if n_valid > 0:
-            p0 = self._prev_pts[fb_ok].reshape(-1, 2)   # (M, 2)
-            p1 = next_pts[fb_ok].reshape(-1, 2)          # (M, 2)
-            flow_vecs = p1 - p0                           # (M, 2)
+            p0 = self._prev_pts[fb_ok].reshape(-1, 2)
+            p1 = next_pts[fb_ok].reshape(-1, 2)
+            flow_vecs = p1 - p0
         else:
             flow_vecs = np.zeros((0, 2), dtype=np.float32)
 
         # --- IIR flow speed update ---
         if n_valid > 0:
-            magnitudes = np.sqrt(
-                flow_vecs[:, 0] ** 2 + flow_vecs[:, 1] ** 2
-            )
+            magnitudes    = np.sqrt(flow_vecs[:, 0] ** 2 + flow_vecs[:, 1] ** 2)
             instant_speed = float(np.median(magnitudes))
         else:
             instant_speed = 0.0
@@ -276,7 +284,7 @@ class LKTracker(object):
         )
 
         # --- Soft reinit decision ---
-        median_fb = float(np.median(fb_error[fwd_ok])) if np.any(fwd_ok) else 0.0
+        median_fb  = float(np.median(fb_error[fwd_ok])) if np.any(fwd_ok) else 0.0
         needs_reinit = (
             n_valid < _MIN_TRACKED_PTS
             or median_fb > _FB_ERROR_THRESH
@@ -288,10 +296,8 @@ class LKTracker(object):
         self._prev_gray  = curr_clahe
 
         if needs_reinit:
-            # Soft reinit: detect fresh features for the NEXT frame
             self._prev_pts = self.detect_features(curr_clahe)
         else:
-            # Keep only validated surviving points
             self._prev_pts = next_pts[fb_ok].reshape(-1, 1, 2)
 
         return flow_vecs, fb_ok
@@ -300,37 +306,35 @@ class LKTracker(object):
         """
         ORB-based keyframe matching with RANSAC homography outlier rejection.
 
-        Computes a horizontal pixel offset between the current frame and a
-        stored keyframe — suitable for yaw / heading correction.
+        Returns the horizontal pixel offset AND the in-plane rotation angle
+        extracted from the homography matrix.  The rotation component is
+        rotation-invariant and therefore **more reliable on curved segments**
+        where the pure dx signal is contaminated by the projective warp.
 
         Parameters
         ----------
         curr_frame : np.ndarray  shape (H, W) or (H, W, C)  uint8
         keyframe_gray : np.ndarray  shape (H, W)  uint8 or float32
-            The stored teach keyframe.  Accepts both the raw uint8 gray
-            from disk and the float32 normalised descriptor used by NCC.
 
         Returns
         -------
         horizontal_offset_px : float or None
             Positive = current frame shifted right relative to keyframe.
-            None if matching failed (too few matches, RANSAC failed, etc.).
-        confidence : float
-            Scalar in [0, 1].  Ratio of RANSAC inliers to total matches.
+            None on complete failure.
+        rotation_rad : float
+            In-plane rotation angle of the homography (radians).
+            Positive = current frame rotated counter-clockwise vs keyframe.
             0.0 on failure.
+        confidence : float
+            Inlier ratio in [0, 1].  0.0 on failure.
         """
         # --- Convert inputs to uint8 gray ---
-        if curr_frame.ndim == 3:
-            curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        else:
-            curr_gray = curr_frame.copy()
-        if curr_gray.dtype != np.uint8:
-            curr_gray = np.clip(curr_gray * 255.0, 0, 255).astype(np.uint8)
+        curr_gray = self._to_uint8_gray(curr_frame)
 
         if keyframe_gray.dtype != np.uint8:
             kf_gray = np.clip(keyframe_gray * 255.0, 0, 255).astype(np.uint8)
         else:
-            kf_gray = keyframe_gray
+            kf_gray = keyframe_gray.copy()
 
         # --- CLAHE both images ---
         curr_clahe = self._apply_clahe(curr_gray)
@@ -341,16 +345,16 @@ class LKTracker(object):
         kp_kf,   des_kf   = self._orb.detectAndCompute(kf_clahe,   None)
 
         if des_curr is None or des_kf is None:
-            return None, 0.0
+            return None, 0.0, 0.0
         if len(kp_curr) < 4 or len(kp_kf) < 4:
-            return None, 0.0
+            return None, 0.0, 0.0
 
         # --- BFMatcher (cross-check = True, so no ratio test needed) ---
         matches = self._bf.match(des_curr, des_kf)
         if len(matches) < 4:
-            return None, 0.0
+            return None, 0.0, 0.0
 
-        # Sort by distance for reproducibility (not strictly required)
+        # Sort by descriptor distance for reproducibility
         matches = sorted(matches, key=lambda m: m.distance)
 
         src_pts = np.array(
@@ -370,35 +374,43 @@ class LKTracker(object):
                 _RANSAC_THRESH,
             )
         except cv2.error:
-            return None, 0.0
+            return None, 0.0, 0.0
 
         if H is None or inlier_mask is None:
-            return None, 0.0
+            return None, 0.0, 0.0
 
         n_inliers = int(np.sum(inlier_mask))
         n_matches  = len(matches)
 
         if n_inliers < 4:
-            return None, 0.0
+            return None, 0.0, 0.0
 
         confidence = float(n_inliers) / float(n_matches)
 
-        # --- Horizontal offset = mean x-displacement of inlier pair ---
-        inlier_idx = inlier_mask.ravel().astype(bool)
-        src_inlier = src_pts[inlier_idx].reshape(-1, 2)
-        dst_inlier = dst_pts[inlier_idx].reshape(-1, 2)
+        # --- Horizontal offset = median x-displacement of inlier pairs ---
+        inlier_idx  = inlier_mask.ravel().astype(bool)
+        src_inlier  = src_pts[inlier_idx].reshape(-1, 2)
+        dst_inlier  = dst_pts[inlier_idx].reshape(-1, 2)
         # offset > 0  →  current scene appears shifted RIGHT vs keyframe
-        offset_px  = float(np.median(src_inlier[:, 0] - dst_inlier[:, 0]))
+        offset_px   = float(np.median(src_inlier[:, 0] - dst_inlier[:, 0]))
 
-        return offset_px, confidence
+        # --- In-plane rotation from homography ---
+        # H maps current → keyframe.  The upper-left 2×2 of a planar
+        # homography encodes rotation + scale.  atan2(H[1,0], H[0,0])
+        # gives the pure rotation angle robustly even when the scene has
+        # significant perspective warp (i.e. on curves).
+        # Sign: positive rotation_rad means the camera has turned LEFT
+        # relative to the keyframe (scene appears rotated CW in the image).
+        rotation_rad = float(math.atan2(H[1, 0], H[0, 0]))
+
+        return offset_px, rotation_rad, confidence
 
     def estimate_flow_speed(self):
         """
         Return the IIR-smoothed median optical-flow magnitude (px/frame).
 
         This is updated by every call to ``track()``.  Useful as a
-        proxy for along-path travel speed between keyframe correction
-        events.
+        proxy for along-path travel speed between keyframe correction events.
 
         Returns
         -------
@@ -423,18 +435,18 @@ class LKTracker(object):
 if __name__ == '__main__':
     import sys
 
-    print("LKTracker self-test")
+    print("LKTracker self-test (full-resolution mode)")
     print("  OpenCV version:", cv2.__version__)
 
-    W, H = 115, 44
-    tracker = LKTracker(img_w=W, img_h=H)
+    W, H = 640, 480
+    tracker = LKTracker()   # resolution-agnostic
 
     # Synthetic frame: random noise so Shi-Tomasi finds corners
-    rng   = np.random.RandomState(42)
+    rng    = np.random.RandomState(42)
     frame0 = rng.randint(0, 256, (H, W), dtype=np.uint8)
 
-    # Shift frame0 by 5 px horizontally to create frame1
-    shift_px = 5
+    # Shift frame0 by 10 px horizontally to create frame1
+    shift_px = 10
     frame1   = np.zeros_like(frame0)
     frame1[:, shift_px:] = frame0[:, :W - shift_px]
 
@@ -448,10 +460,10 @@ if __name__ == '__main__':
         print("  track(): no valid flow  (OK for purely random noise)")
 
     # match_to_keyframe
-    offset, conf = tracker.match_to_keyframe(frame1, frame0)
+    offset, rot_rad, conf = tracker.match_to_keyframe(frame1, frame0)
     if offset is not None:
-        print("  match_to_keyframe(): offset=%.2f px  confidence=%.3f  "
-              "(expected ~%.1f)" % (offset, conf, float(shift_px)))
+        print("  match_to_keyframe(): offset=%.2f px  rotation=%.4f rad  confidence=%.3f  "
+              "(expected offset ~%.1f)" % (offset, rot_rad, conf, float(shift_px)))
     else:
         print("  match_to_keyframe(): insufficient features on synthetic image "
               "(expected — pure noise has poor ORB corners)")

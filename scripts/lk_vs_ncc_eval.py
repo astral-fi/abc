@@ -62,8 +62,8 @@ except ImportError as _e:
 # ---------------------------------------------------------------------------
 # Constants — must match jetracer_teach_repeat_core.launch defaults
 # ---------------------------------------------------------------------------
-DEFAULT_RESIZE_W   = 115
-DEFAULT_RESIZE_H   = 44
+DEFAULT_RESIZE_W   = 320
+DEFAULT_RESIZE_H   = 120
 DEFAULT_FOV_DEG    = 160.0
 DEFAULT_HEADING_GAIN = 1.0   # applied to both for comparison; set to 1 to
                               # get raw pixel offset, not yaw angle
@@ -271,8 +271,9 @@ def run_evaluation(run_dir, gt_csv=None, out_csv='lk_vs_ncc_results.csv',
             ncc_dx = _ncc_offset(prev_frame['desc'], frame['desc'])
             row['ncc_offset_px'] = ncc_dx
 
-            # ---- LK (ORB match) offset ----
-            lk_dx, lk_conf = tracker.match_to_keyframe(
+            # ---- LK (ORB match) offset + rotation ----
+            # match_to_keyframe now returns (offset_px, rotation_rad, confidence)
+            lk_dx, lk_rot_rad, lk_conf = tracker.match_to_keyframe(
                 frame['gray_u8'], prev_frame['gray_u8']
             )
             row['lk_offset_px']  = lk_dx      # may be None

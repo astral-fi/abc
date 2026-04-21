@@ -87,8 +87,8 @@ class VisualPoseLocaliser(object):
         self.max_heading_correction_deg = float(rospy.get_param('~max_heading_correction_deg', 12.0))
 
         # Image preprocessing params (must match teach/repeat settings)
-        self.resize_w = int(rospy.get_param('/image_resize_width', rospy.get_param('~image_resize_width', 115)))
-        self.resize_h = int(rospy.get_param('/image_resize_height', rospy.get_param('~image_resize_height', 44)))
+        self.resize_w = int(rospy.get_param('/image_resize_width', rospy.get_param('~image_resize_width', 320)))
+        self.resize_h = int(rospy.get_param('/image_resize_height', rospy.get_param('~image_resize_height', 120)))
         self.image_fov_deg = float(rospy.get_param('/image_field_of_view_width_deg', 160.0))
         self.image_fov_rad = math.radians(self.image_fov_deg)
         
@@ -100,9 +100,18 @@ class VisualPoseLocaliser(object):
         self.use_lk_hybrid = bool(rospy.get_param('~use_lk_hybrid', True))
         # ~lk_confidence_threshold: fall back to NCC when LK confidence < this.
         self.lk_confidence_threshold = float(
-            rospy.get_param('~lk_confidence_threshold', 0.4))
+            rospy.get_param('~lk_confidence_threshold', 0.20))
         # ~lk_flow_alpha: IIR smoothing for LK flow speed estimate.
         self.lk_flow_alpha = float(rospy.get_param('~lk_flow_alpha', 0.15))
+        # ~lk_use_rotation: use homography rotation angle for heading correction
+        # on curves instead of (or blended with) the raw horizontal pixel offset.
+        # True is strongly recommended — the rotation component is invariant to
+        # the projective warp produced by curved segments.
+        self.lk_use_rotation = bool(rospy.get_param('~lk_use_rotation', True))
+        # ~lk_rotation_weight: blend factor between homography rotation (1.0)
+        # and horizontal offset (0.0) when both are available.  1.0 = pure
+        # rotation; 0.5 = equal blend.  Default 0.7 weights rotation heavily.
+        self.lk_rotation_weight = float(rospy.get_param('~lk_rotation_weight', 0.7))
 
         # Disable if lk_tracker.py could not be imported
         if self.use_lk_hybrid and not _LK_AVAILABLE:
@@ -111,11 +120,11 @@ class VisualPoseLocaliser(object):
                           'Falling back to NCC-only mode.')
             self.use_lk_hybrid = False
 
-        # Instantiate tracker (only when hybrid mode is active)
+        # Instantiate tracker: resolution-agnostic, sky masking done externally.
+        # We pass sky_fraction=0.0 because current_gray_full is already ceiling-cropped.
         self._lk_tracker = (
             LKTracker(
-                img_w=self.resize_w,
-                img_h=self.resize_h,
+                sky_fraction=0.0,
                 lk_flow_alpha=self.lk_flow_alpha,
             )
             if self.use_lk_hybrid else None
@@ -130,12 +139,13 @@ class VisualPoseLocaliser(object):
         self.ry = 0.0
         self.ryaw = 0.0
         self.current_desc = None
-        self.current_gray_u8 = None   # uint8 resized (115x44) for LK speed tracking
-        self.current_gray_full = None # uint8 full res for exact ORB keyframe matching
+        self.current_gray_u8 = None   # uint8 resized thumbnail for legacy flow-speed tracking
+        self.current_gray_full = None # uint8 full-res ceiling-cropped for LK ORB matching & flow
         self.current_img_stamp = None
         self.idx = 0
-        self._last_correction_source = 'none'  # 'lk' or 'ncc'
+        self._last_correction_source = 'none'  # 'lk', 'lk_rot', 'lk_blend', or 'ncc'
         self._last_lk_confidence = 0.0
+        self._last_rotation_rad  = 0.0
         
         # Dead-reckoning state for blindly advancing index during visual dropouts
         self.last_rx = None
@@ -335,13 +345,15 @@ class VisualPoseLocaliser(object):
             top_mask = int(raw_gray.shape[0] * self.sky_mask_ratio)
             self.current_gray_full = raw_gray[top_mask:, :]
             
-            # Build uint8 gray thumbnail for LK speed tracking
+            # Build uint8 gray thumbnail (NCC resolution) for legacy flow-speed tracking
             gray_small = cv2.resize(raw_gray, (self.resize_w, self.resize_h), interpolation=cv2.INTER_AREA)
             self.current_gray_u8 = gray_small
 
-            # Feed LK tracker every incoming frame (maintains optical flow state)
+            # Feed LK tracker with FULL-RESOLUTION ceiling-cropped frame.
+            # Full-res gives ORB enough patch area and LK enough gradient
+            # signal to reliably measure sub-degree heading errors on curves.
             if self._lk_tracker is not None:
-                self._lk_tracker.track(gray_small)
+                self._lk_tracker.track(self.current_gray_full)
 
             self.have_image = True
         except CvBridgeError as e:
@@ -350,7 +362,8 @@ class VisualPoseLocaliser(object):
     def _nearest_index(self):
         best_i = 0
         best_d2 = 1e18
-        for i, (x, y, _, _, _, _) in enumerate(self.samples):
+        for i, sample in enumerate(self.samples):
+            x, y = sample[0], sample[1]
             dx = x - self.rx
             dy = y - self.ry
             d2 = dx * dx + dy * dy
@@ -518,43 +531,69 @@ class VisualPoseLocaliser(object):
         teach_sample = self.samples[self.idx]
         teach_desc   = teach_sample[3]
 
-        used_lk      = False
+        used_lk       = False
         lk_confidence = 0.0
 
         if self.use_lk_hybrid and self._lk_tracker is not None \
                 and self.current_gray_full is not None:
-                
-            # Use raw uncorrupted FULL RESOLUTION uint8 image stored at index 6
+
+            # Index 6 = full-resolution ceiling-cropped uint8 teach image
             teach_gray_full = teach_sample[6]
 
-            lk_dx, lk_confidence = self._lk_tracker.match_to_keyframe(
+            # match_to_keyframe now returns 3-tuple: (offset_px, rotation_rad, confidence)
+            lk_result = self._lk_tracker.match_to_keyframe(
                 self.current_gray_full, teach_gray_full
             )
+            lk_dx, lk_rot_rad, lk_confidence = lk_result
 
             if lk_dx is not None and lk_confidence >= self.lk_confidence_threshold:
-                # LK succeeded: convert pixel offset to yaw correction
                 full_width_px = float(self.current_gray_full.shape[1])
-                yaw_corr = self.heading_sign * self.heading_gain * \
+
+                # ── Offset-based yaw (classic approach) ──────────────────────
+                yaw_from_offset = self.heading_sign * self.heading_gain * \
                     (lk_dx / full_width_px) * self.image_fov_rad
+
+                # ── Rotation-based yaw (curve-robust) ────────────────────────
+                # lk_rot_rad is the in-plane rotation of the homography.
+                # Sign: positive lk_rot_rad = camera turned LEFT vs keyframe
+                # (scene rotated CW) → we need to steer RIGHT → heading_sign
+                # convention is already accounted for by inverting the sign.
+                # Apply heading_gain and clamp same as offset path.
+                yaw_from_rotation = self.heading_sign * self.heading_gain * \
+                    (-lk_rot_rad)   # negate: CCW scene rotation = CW robot drift
+
+                if self.lk_use_rotation:
+                    # Weighted blend: rotation_weight × rot + (1-w) × offset
+                    w = _clamp(self.lk_rotation_weight, 0.0, 1.0)
+                    yaw_corr = w * yaw_from_rotation + (1.0 - w) * yaw_from_offset
+                    correction_src = 'lk_blend'
+                else:
+                    yaw_corr = yaw_from_offset
+                    correction_src = 'lk'
+
                 yaw_corr = _clamp(yaw_corr,
                                   -self.max_heading_correction_rad,
                                   self.max_heading_correction_rad)
-                used_lk  = True
-                dx       = lk_dx
+                used_lk   = True
+                dx        = lk_dx
+                self._last_rotation_rad = lk_rot_rad
+                self._last_correction_source = correction_src
 
         if not used_lk:
-            # If LK fails, we can only safely use NCC if NCC itself passed!
+            # If LK fails, we can only safely use NCC if NCC itself passed
             if best_corr >= self.corr_threshold:
                 yaw_corr, dx = self._estimate_yaw_error(teach_desc, self.current_desc)
                 lk_confidence = 0.0
+                self._last_correction_source = 'ncc'
+                self._last_rotation_rad      = 0.0
             else:
-                # BOTH trackers failed! Abort visual correction this frame.
+                # BOTH trackers failed — abort visual correction this frame
                 self._last_correction_source = 'none'
                 self._last_lk_confidence     = 0.0
+                self._last_rotation_rad      = 0.0
                 return 0.0, 0.0, best_corr
 
-        self._last_correction_source = 'lk' if used_lk else 'ncc'
-        self._last_lk_confidence     = lk_confidence
+        self._last_lk_confidence = lk_confidence
         return yaw_corr, dx, best_corr
 
     def run(self):
@@ -603,14 +642,18 @@ class VisualPoseLocaliser(object):
             # We compute the exact physical angle of the path from the camera (gain=1.0) and place the carrot there.
 
             # Determine the exact physical angular offset from the camera's perspective.
-            # _visual_update correctly handles resolution-scaling internally and clamps the output.
-            # We divide out the artificial P-Controller `heading_gain` dampener to restore the TRUE Physical (gain=1.0) matrix angle.
+            # _visual_update handles resolution-scaling internally and clamps the output.
+            # We divide out the P-Controller heading_gain to restore the true physical angle.
             true_visual_yaw = _wrap(self.ryaw + (yaw_corr / max(self.heading_gain, 1e-6)))
-            
-            # Place the goal dynamically far enough ahead to prevent mathematical denominator explosion in Pure Pursuit
-            lookahead_radius = 0.35
-            
-            # Project the reactive target cleanly off the robot's physical visual nose
+
+            # Adaptive lookahead radius:
+            #   - Shorter when NCC/LK correlation is weak (reactive on curves/dropouts)
+            #   - Longer on high-confidence straights (smoother tracking)
+            # corr ∈ [-1, 1]; clamp to [0, 1] before scaling.
+            corr_clamped     = _clamp(corr, 0.0, 1.0)
+            lookahead_radius = 0.20 + 0.20 * corr_clamped   # [0.20, 0.40] m
+
+            # Project the reactive target off the robot's physical visual nose
             reactive_gx = self.rx + lookahead_radius * math.cos(true_visual_yaw)
             reactive_gy = self.ry + lookahead_radius * math.sin(true_visual_yaw)
             
@@ -632,25 +675,29 @@ class VisualPoseLocaliser(object):
                 if self._lk_tracker is not None else 0.0
             )
             debug_payload = json.dumps({
-                'stamp':          self.current_img_stamp.to_sec()
-                                  if self.current_img_stamp else 0.0,
-                'keyframe_idx':   self.idx,
-                'goal_idx':       -1,
-                'source':         self._last_correction_source,
-                'lk_confidence':  round(self._last_lk_confidence, 4),
-                'lk_flow_speed':  round(lk_speed, 4),
-                'ncc_score':      round(corr, 4),
-                'dx_px':          round(dx, 3),
-                'yaw_corr_deg':   round(math.degrees(yaw_corr), 3),
+                'stamp':           self.current_img_stamp.to_sec()
+                                   if self.current_img_stamp else 0.0,
+                'keyframe_idx':    self.idx,
+                'goal_idx':        -1,
+                'source':          self._last_correction_source,
+                'lk_confidence':   round(self._last_lk_confidence, 4),
+                'lk_rotation_deg': round(math.degrees(self._last_rotation_rad), 3),
+                'lk_flow_speed':   round(lk_speed, 4),
+                'ncc_score':       round(corr, 4),
+                'lookahead_m':     round(lookahead_radius, 3),
+                'dx_px':           round(dx, 3),
+                'yaw_corr_deg':    round(math.degrees(yaw_corr), 3),
             }, sort_keys=True)
             self.debug_pub.publish(String(data=debug_payload))
 
             rospy.loginfo_throttle(
                 1.0,
-                '[visual_pose_localiser] idx=%d goal=-1 corr=%.3f '
-                'dx=%.2fpx yaw_corr=%.2fdeg src=%s lk_conf=%.2f lk_spd=%.2f',
+                '[visual_pose_localiser] idx=%d corr=%.3f '
+                'dx=%.1fpx rot=%.2fdeg yaw_corr=%.2fdeg lah=%.2fm src=%s lk_conf=%.2f spd=%.2f',
                 self.idx, corr, dx,
+                math.degrees(self._last_rotation_rad),
                 math.degrees(yaw_corr),
+                lookahead_radius,
                 self._last_correction_source,
                 self._last_lk_confidence,
                 lk_speed,

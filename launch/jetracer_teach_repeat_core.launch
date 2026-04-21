@@ -64,12 +64,22 @@
 
   <!--
     Images are resized to this resolution before patch-normalisation,
-    storage, and comparison.  115×44 is the QVPR paper default and is
-    Jetson Nano-safe at 20+ Hz.  Do NOT increase — larger images add
-    latency with no accuracy benefit for this algorithm.
+    storage, and comparison.
+
+    115×44  — original QVPR paper default (Jetson Nano-safe at 20+ Hz).
+                Suitable for straight-line tracking only; gives 0.72 px/deg
+                horizontal resolution, which is too coarse to detect the
+                sub-2° drift occurring on gentle curves.
+
+    320×120 — recommended for curve tracking.  Gives 2 px/deg horizontal
+                resolution so a 1° heading drift produces a clean 2-px
+                phase-correlate peak.  CPU cost on Jetson Nano is ~3× higher
+                but still achieves ≥ 10 Hz at the 15 Hz publish rate.
+                IMPORTANT: changing this value requires re-running the teach
+                phase so stored NCC descriptors match the new resolution.
   -->
-  <param name="/image_resize_width"  value="115" />
-  <param name="/image_resize_height" value="44"  />
+  <param name="/image_resize_width"  value="320" />
+  <param name="/image_resize_height" value="120"  />
 
   <!--
     Patch normalisation kernel size for lighting robustness.
