@@ -591,22 +591,8 @@ class VisualPoseLocaliser(object):
                     # DO NOT negate lk_rot_rad — the previous negation was inverting
                     # the correction direction and fighting the offset signal.
                     yaw_from_rotation = self.heading_sign * self.heading_gain * lk_rot_rad
-
-                    # ── Adaptive blend weight ───────────────────────────────
-                    # yaw_corr = w * yaw_from_rotation + (1-w) * yaw_from_offset
-                    #
-                    # PROBLEM with a fixed w=lk_rotation_weight (e.g. 0.7):
-                    #   Pure lateral drift on a straight → lk_rot_rad ≈ 0
-                    #   → yaw_from_rotation ≈ 0
-                    #   → yaw_corr = 0.7*0 + 0.3*offset = only 30% of correction.
-                    #   This systematically under-corrects lateral drift.
-                    #
-                    # FIX — ramp w proportional to rotation magnitude:
-                    #   |lk_rot_rad| = 0°  → w = 0  (pure offset, catches lateral drift)
-                    #   |lk_rot_rad| ≥ 5°  → w = lk_rotation_weight (full blend for curves)
-                    _BLEND_RAMP_RAD = math.radians(5.0)
-                    rot_fraction = min(abs(lk_rot_rad) / _BLEND_RAMP_RAD, 1.0)
-                    w = _clamp(self.lk_rotation_weight * rot_fraction, 0.0, 1.0)
+                    # Weighted blend: rotation_weight × rot + (1-w) × offset
+                    w = _clamp(self.lk_rotation_weight, 0.0, 1.0)
                     yaw_corr = w * yaw_from_rotation + (1.0 - w) * yaw_from_offset
                     correction_src = 'lk_blend'
                 else:

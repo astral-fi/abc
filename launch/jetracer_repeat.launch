@@ -83,34 +83,19 @@
       <param name="~corr_threshold"     value="0.08" />
       <param name="~max_index_jump"     value="5" />
       <!--
-        heading_gain: P-gain applied to the raw pixel shift / affine rotation
-        before it is converted to a yaw correction.
-
-        History:
-          0.30  original value
-          0.50  raised for curve responsiveness
-          0.25  reduced after adaptive blend fix — the blend now passes 100%
-                of the offset signal on straights (was 30% when rotation weight
-                was a fixed 0.7), so the effective gain was ~3× larger at the
-                same physical lateral drift.  Halving the gain restores a
-                moderate correction magnitude without oscillation.
-
-        If the robot is still oscillating: lower further to 0.20.
-        If it under-corrects lateral drift on straights: raise to 0.30.
+        heading_gain: P-gain applied to the raw pixel shift before it is
+        converted to a yaw correction.  Increased from 0.3 → 0.5 to make
+        the system more responsive on curves.  Re-tune downward if the
+        robot oscillates on straights.
       -->
-      <param name="~heading_gain"       value="0.25" />
+      <param name="~heading_gain"       value="0.5" />
       <param name="~heading_sign"       value="-1.0" />
       <!--
-        max_heading_correction_deg: hard cap on yaw correction per cycle.
-
-        History:
-          10°   original
-          20°   raised to handle curve apex catch-up corrections
-          10°   restored — with the rotation sign fix the curve corrections
-                are now strong enough at 10°; a 20° cap was contributing to
-                the overshoot/oscillation felt on straights.
+        max_heading_correction_deg: the absolute cap on yaw correction per
+        cycle.  Raised from 10° → 20° so the controller can issue the large
+        catch-up corrections needed when drift has accumulated on a curve.
       -->
-      <param name="~max_heading_correction_deg" value="10.0" />
+      <param name="~max_heading_correction_deg" value="20.0" />
     <param name="~behind_skip_threshold_deg" value="85.0" />
     <param name="~max_skip_ahead"             value="200" />
     <param name="~loop_route"                 value="false" />
