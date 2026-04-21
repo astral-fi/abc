@@ -110,6 +110,21 @@ def _load_csv(path):
     # Prepend first sample so length matches
     out['speed'] = np.concatenate([[spd[0] if len(spd) else 0.0], spd])
 
+    # ── Normalise to origin ───────────────────────────────────────────────────
+    # Translate and rotate so the FIRST sample is at (x=0, y=0, yaw=0).
+    # This makes all three phases directly comparable on the same plot
+    # regardless of the physical start position/heading of each run.
+    x0   = float(out['x'][0])
+    y0   = float(out['y'][0])
+    yaw0 = float(out['yaw'][0])
+    cos_y = math.cos(-yaw0)
+    sin_y = math.sin(-yaw0)
+    dx_c  = out['x'] - x0
+    dy_c  = out['y'] - y0
+    out['x']   =  dx_c * cos_y - dy_c * sin_y
+    out['y']   =  dx_c * sin_y + dy_c * cos_y
+    out['yaw'] = (out['yaw'] - yaw0 + math.pi) % (2.0 * math.pi) - math.pi
+
     return out
 
 
@@ -201,8 +216,7 @@ def _style_ax(ax, xlabel='', ylabel='', title=''):
     if ylabel:
         ax.set_ylabel(ylabel, color='#AAAACC', fontsize=10)
     if title:
-        ax.set_title(title, color='#EEEEFF', fontsize=11, fontweight='bold',
-                     pad=8)
+        ax.set_title(title, color='#EEEEFF', fontsize=11, fontweight='bold')
     ax.xaxis.label.set_color('#AAAACC')
     ax.yaxis.label.set_color('#AAAACC')
 
