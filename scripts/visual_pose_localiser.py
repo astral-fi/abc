@@ -103,15 +103,27 @@ class VisualPoseLocaliser(object):
             rospy.get_param('~lk_confidence_threshold', 0.20))
         # ~lk_flow_alpha: IIR smoothing for LK flow speed estimate.
         self.lk_flow_alpha = float(rospy.get_param('~lk_flow_alpha', 0.15))
-        # ~lk_use_rotation: use homography rotation angle for heading correction
+        # ~lk_use_rotation: use affine rotation angle for heading correction
         # on curves instead of (or blended with) the raw horizontal pixel offset.
         # True is strongly recommended — the rotation component is invariant to
         # the projective warp produced by curved segments.
         self.lk_use_rotation = bool(rospy.get_param('~lk_use_rotation', True))
-        # ~lk_rotation_weight: blend factor between homography rotation (1.0)
+        # ~lk_rotation_weight: blend factor between affine rotation (1.0)
         # and horizontal offset (0.0) when both are available.  1.0 = pure
         # rotation; 0.5 = equal blend.  Default 0.7 weights rotation heavily.
         self.lk_rotation_weight = float(rospy.get_param('~lk_rotation_weight', 0.7))
+        # ~lk_max_rotation_deg: if the recovered affine rotation exceeds this
+        # value (degrees), it is treated as a degenerate match (typical at the
+        # apex of a semicircle) and the blend falls back to offset-only.
+        # This is a second line of defence on top of lk_tracker's own guard.
+        self.lk_max_rotation_deg = float(rospy.get_param('~lk_max_rotation_deg', 25.0))
+        self._lk_max_rotation_rad = math.radians(self.lk_max_rotation_deg)
+        # ~lk_flow_heading_gain: low-gain fallback that converts the IIR lateral
+        # optical-flow (px/frame) to a heading correction when BOTH absolute
+        # matchers (LK keyframe + NCC) have failed.  This keeps the robot from
+        # going completely blind on the apex of a semicircle.
+        # Typical value: 0.005–0.010.  Set to 0.0 to disable.
+        self.lk_flow_heading_gain = float(rospy.get_param('~lk_flow_heading_gain', 0.006))
 
         # Disable if lk_tracker.py could not be imported
         if self.use_lk_hybrid and not _LK_AVAILABLE:
@@ -554,20 +566,21 @@ class VisualPoseLocaliser(object):
                     (lk_dx / full_width_px) * self.image_fov_rad
 
                 # ── Rotation-based yaw (curve-robust) ────────────────────────
-                # lk_rot_rad is the in-plane rotation of the homography.
-                # Sign: positive lk_rot_rad = camera turned LEFT vs keyframe
-                # (scene rotated CW) → we need to steer RIGHT → heading_sign
-                # convention is already accounted for by inverting the sign.
-                # Apply heading_gain and clamp same as offset path.
-                yaw_from_rotation = self.heading_sign * self.heading_gain * \
-                    (-lk_rot_rad)   # negate: CCW scene rotation = CW robot drift
+                # lk_rot_rad is the in-plane rotation of the affine model.
+                # Guard: if |rotation| > lk_max_rotation_rad, the match is
+                # too degenerate to produce a reliable rotation estimate
+                # (lk_tracker already zeroes it, but we guard here too).
+                rotation_valid = abs(lk_rot_rad) <= self._lk_max_rotation_rad
 
-                if self.lk_use_rotation:
+                if self.lk_use_rotation and rotation_valid:
+                    yaw_from_rotation = self.heading_sign * self.heading_gain * \
+                        (-lk_rot_rad)   # negate: CCW scene rotation = CW robot drift
                     # Weighted blend: rotation_weight × rot + (1-w) × offset
                     w = _clamp(self.lk_rotation_weight, 0.0, 1.0)
                     yaw_corr = w * yaw_from_rotation + (1.0 - w) * yaw_from_offset
                     correction_src = 'lk_blend'
                 else:
+                    # Rotation degenerate or disabled — use offset only
                     yaw_corr = yaw_from_offset
                     correction_src = 'lk'
 
@@ -587,7 +600,29 @@ class VisualPoseLocaliser(object):
                 self._last_correction_source = 'ncc'
                 self._last_rotation_rad      = 0.0
             else:
-                # BOTH trackers failed — abort visual correction this frame
+                # BOTH absolute matchers failed.
+                # Last resort: use the IIR-smoothed lateral optical flow as a
+                # low-gain heading proxy.  This prevents the robot from going
+                # completely blind on the apex of a semicircle.
+                lat_flow = (
+                    self._lk_tracker.lateral_flow()
+                    if self._lk_tracker is not None else 0.0
+                )
+                if self.lk_flow_heading_gain > 0.0 and abs(lat_flow) > 0.5:
+                    # lat_flow > 0 → scene moving RIGHT → robot drifted LEFT
+                    # heading_sign=-1: -1 × gain × lat_flow → negative yaw_corr
+                    # (steer right to compensate), so use same sign convention.
+                    yaw_corr = _clamp(
+                        self.heading_sign * self.lk_flow_heading_gain * lat_flow,
+                        -self.max_heading_correction_rad * 0.5,   # half-cap for safety
+                        self.max_heading_correction_rad * 0.5,
+                    )
+                    dx = lat_flow
+                    self._last_correction_source = 'lk_flow'
+                    self._last_rotation_rad      = 0.0
+                    self._last_lk_confidence     = 0.0
+                    return yaw_corr, dx, best_corr
+                # Truly nothing to work with — abort correction this frame
                 self._last_correction_source = 'none'
                 self._last_lk_confidence     = 0.0
                 self._last_rotation_rad      = 0.0
@@ -683,6 +718,9 @@ class VisualPoseLocaliser(object):
                 'lk_confidence':   round(self._last_lk_confidence, 4),
                 'lk_rotation_deg': round(math.degrees(self._last_rotation_rad), 3),
                 'lk_flow_speed':   round(lk_speed, 4),
+                'lk_flow_lateral': round(
+                    self._lk_tracker.lateral_flow()
+                    if self._lk_tracker is not None else 0.0, 3),
                 'ncc_score':       round(corr, 4),
                 'lookahead_m':     round(lookahead_radius, 3),
                 'dx_px':           round(dx, 3),

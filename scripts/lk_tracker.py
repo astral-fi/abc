@@ -24,14 +24,20 @@ Public API
   # Match current frame against a stored keyframe gray:
   #   Returns (offset_px, rotation_rad, confidence)
   #     offset_px    – horizontal pixel offset (positive = scene shifted RIGHT)
-  #     rotation_rad – in-plane rotation angle from homography H (radians)
-  #                    Use this for curve-correct heading correction instead of offset_px
+  #     rotation_rad – in-plane rotation in radians, extracted from a PARTIAL
+  #                    AFFINE model (4-DOF). Capped at ±25° — larger values
+  #                    indicate degenerate matching and are zeroed out.
   #     confidence   – inlier ratio in [0, 1]; 0 on failure
   #   On failure: (None, 0.0, 0.0)
   offset_px, rotation_rad, confidence = tracker.match_to_keyframe(curr_gray, kf_gray)
 
   # Smoothed optical-flow magnitude (along-path speed proxy):
   speed = tracker.estimate_flow_speed()
+
+  # IIR-smoothed median HORIZONTAL optical-flow component.
+  # Positive = scene moving RIGHT = robot drifting LEFT relative to path.
+  # Use as a fallback heading signal when absolute keyframe matching fails:
+  lat = tracker.lateral_flow()
 """
 
 from __future__ import division, print_function
@@ -70,11 +76,18 @@ _MIN_TRACKED_PTS   = 20
 _CLAHE_CLIP_LIMIT  = 2.0
 _CLAHE_TILE_GRID   = (8, 8)   # coarser grid for full-res
 
-# RANSAC homography inlier distance (pixels)
+# RANSAC threshold for estimateAffinePartial2D (pixels)
 _RANSAC_THRESH     = 3.0   # tighter at full resolution
 
-# IIR low-pass alpha for flow speed estimate
-_IIR_ALPHA         = 0.15
+# Rotation sanity guard: homography/affine rotations larger than this
+# are treated as degenerate (e.g. at semicircle apex where the scene
+# shares <30% of features with the keyframe).  Set to 25° — the maximum
+# plausible heading error that a correctly-matching frame should show.
+_MAX_ROTATION_RAD  = math.radians(25.0)
+
+# IIR weights
+_IIR_ALPHA         = 0.15   # flow speed
+_LATERAL_FLOW_ALPHA = 0.10  # lateral flow — heavier smoothing for stability
 
 
 class LKTracker(object):
@@ -131,8 +144,10 @@ class LKTracker(object):
         self._flow_vecs  = None   # (N, 2) float32 displacement vectors
         self._valid_mask = None   # (N,) bool
 
-        # IIR-filtered flow speed
-        self._flow_speed_iir = 0.0
+        # IIR-filtered flow speed (magnitude)
+        self._flow_speed_iir   = 0.0
+        # IIR-filtered lateral (horizontal) flow — heading drift proxy
+        self._lateral_flow_iir = 0.0
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -272,15 +287,21 @@ class LKTracker(object):
         else:
             flow_vecs = np.zeros((0, 2), dtype=np.float32)
 
-        # --- IIR flow speed update ---
+        # --- IIR flow speed + lateral flow update ---
         if n_valid > 0:
-            magnitudes    = np.sqrt(flow_vecs[:, 0] ** 2 + flow_vecs[:, 1] ** 2)
-            instant_speed = float(np.median(magnitudes))
+            magnitudes      = np.sqrt(flow_vecs[:, 0] ** 2 + flow_vecs[:, 1] ** 2)
+            instant_speed   = float(np.median(magnitudes))
+            instant_lateral = float(np.median(flow_vecs[:, 0]))
         else:
-            instant_speed = 0.0
+            instant_speed   = 0.0
+            instant_lateral = 0.0
         self._flow_speed_iir = (
             self._alpha * instant_speed
             + (1.0 - self._alpha) * self._flow_speed_iir
+        )
+        self._lateral_flow_iir = (
+            _LATERAL_FLOW_ALPHA * instant_lateral
+            + (1.0 - _LATERAL_FLOW_ALPHA) * self._lateral_flow_iir
         )
 
         # --- Soft reinit decision ---
@@ -366,17 +387,26 @@ class LKTracker(object):
             dtype=np.float32,
         ).reshape(-1, 1, 2)
 
-        # --- RANSAC homography to remove geometric outliers ---
+        # --- Partial-affine estimation (4-DOF: tx, ty, rotation, uniform scale) ---
+        # WHY NOT findHomography?
+        # A full 8-DOF homography degenerates at large viewpoint changes
+        # (e.g. the apex of a semicircle) and RANSAC can select a set of 4
+        # inlier correspondences consistent with a ~180° rotation flip.
+        # estimateAffinePartial2D is geometrically constrained to
+        # M = [[s·cos θ, −s·sin θ, tx],
+        #      [s·sin θ,  s·cos θ, ty]]
+        # which has a unique minimum — the 175° degenerate solution cannot
+        # arise because sin and cos must satisfy sin²+cos²=1.
         try:
-            H, inlier_mask = cv2.findHomography(
+            M, inlier_mask = cv2.estimateAffinePartial2D(
                 src_pts, dst_pts,
-                cv2.RANSAC,
-                _RANSAC_THRESH,
+                method=cv2.RANSAC,
+                ransacReprojThreshold=_RANSAC_THRESH,
             )
         except cv2.error:
             return None, 0.0, 0.0
 
-        if H is None or inlier_mask is None:
+        if M is None or inlier_mask is None:
             return None, 0.0, 0.0
 
         n_inliers = int(np.sum(inlier_mask))
@@ -394,14 +424,21 @@ class LKTracker(object):
         # offset > 0  →  current scene appears shifted RIGHT vs keyframe
         offset_px   = float(np.median(src_inlier[:, 0] - dst_inlier[:, 0]))
 
-        # --- In-plane rotation from homography ---
-        # H maps current → keyframe.  The upper-left 2×2 of a planar
-        # homography encodes rotation + scale.  atan2(H[1,0], H[0,0])
-        # gives the pure rotation angle robustly even when the scene has
-        # significant perspective warp (i.e. on curves).
-        # Sign: positive rotation_rad means the camera has turned LEFT
-        # relative to the keyframe (scene appears rotated CW in the image).
-        rotation_rad = float(math.atan2(H[1, 0], H[0, 0]))
+        # --- In-plane rotation from partial affine matrix ---
+        # M = [[s·cos θ, −s·sin θ, tx],
+        #      [s·sin θ,  s·cos θ, ty]]
+        # → θ = atan2(M[1, 0], M[0, 0])
+        # Sign: positive θ = camera rotated CCW relative to keyframe
+        #        (scene appears rotated CW) → robot has drifted LEFT.
+        rotation_rad = float(math.atan2(M[1, 0], M[0, 0]))
+
+        # --- Sanity guard: reject degenerate estimates ---
+        # If |rotation| > _MAX_ROTATION_RAD (25°) the scene overlap with the
+        # stored keyframe is too poor to produce a physically meaningful
+        # rotation estimate.  Zero it out so the caller falls back to the
+        # offset-only path, which is less sensitive to degenerate matches.
+        if abs(rotation_rad) > _MAX_ROTATION_RAD:
+            rotation_rad = 0.0
 
         return offset_px, rotation_rad, confidence
 
@@ -420,13 +457,37 @@ class LKTracker(object):
         """
         return self._flow_speed_iir
 
+    def lateral_flow(self):
+        """
+        Return the IIR-smoothed median HORIZONTAL optical-flow component
+        (px/frame) from recent frame-to-frame tracking.
+
+        Sign convention
+        ---------------
+        Positive = scene moving RIGHT = robot drifting LEFT relative to path
+        (needs steer-right correction, i.e. negative yaw_corr with typical
+        heading_sign = -1).
+
+        Use as a fallback heading proxy when absolute keyframe matching fails
+        (e.g. at the apex of a semicircle where NCC and ORB both lose lock).
+        The gain applied by the caller should be ≪ the normal heading_gain.
+
+        Returns
+        -------
+        float
+            Smoothed lateral flow in pixels per frame.  0.0 until the
+            first successful tracking result.
+        """
+        return self._lateral_flow_iir
+
     def reset(self):
         """Hard reset — clears all tracking state."""
-        self._prev_gray       = None
-        self._prev_pts        = None
-        self._flow_vecs       = None
-        self._valid_mask      = None
-        self._flow_speed_iir  = 0.0
+        self._prev_gray        = None
+        self._prev_pts         = None
+        self._flow_vecs        = None
+        self._valid_mask       = None
+        self._flow_speed_iir   = 0.0
+        self._lateral_flow_iir = 0.0
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,13 @@
     <param name="start_index" value="0"/>
     <param name="~publish_hz" value="15.0" />
       <param name="~lookahead_steps" value="2" />
-      <param name="~search_range"      value="3" />
+      <!--
+        search_range: half-width of the NCC search window (keyframes).
+        Raised from 3 → 10 so the localiser searches ±10 keyframes around
+        the current index.  A tight semicircle can advance the index quickly;
+        a wider window ensures we always find the best-correlated frame.
+      -->
+      <param name="~search_range"      value="10" />
       <!--
         corr_threshold: minimum NCC score to accept a visual correction.
         Lowered to 0.08 (from 0.13) because at 320 px width the phase-
@@ -96,16 +102,24 @@
     <!--
       LK hybrid params
       lk_confidence_threshold: lowered from 0.40 → 0.20 because at full
-        resolution with 200 ORB features the homography inlier ratio is
+        resolution with 200 ORB features the partial-affine inlier ratio is
         typically 0.20–0.50 on textured indoor scenes.
-      lk_use_rotation: true = use homography in-plane rotation angle as the
+      lk_use_rotation: true = use partial-affine in-plane rotation angle as the
         primary heading signal on curves (rotation-invariant, curve-safe).
       lk_rotation_weight: 0.7 = 70% rotation + 30% dx offset blend.
         Set to 1.0 for pure-rotation mode; 0.0 to disable and use dx only.
+      lk_max_rotation_deg: rotations larger than this are treated as degenerate
+        (typical at the semicircle apex) and fall back to offset-only.
+        This matches lk_tracker's internal _MAX_ROTATION_RAD guard.
+      lk_flow_heading_gain: gain for the lateral optical-flow fallback when BOTH
+        absolute matchers (LK keyframe + NCC) fail.  Prevents going completely
+        blind on the apex of a semicircle.  Set to 0.0 to disable.
     -->
     <param name="~lk_confidence_threshold" value="0.20" />
     <param name="~lk_use_rotation"         value="true" />
     <param name="~lk_rotation_weight"      value="0.7" />
+    <param name="~lk_max_rotation_deg"     value="25.0" />
+    <param name="~lk_flow_heading_gain"    value="0.006" />
     <remap from="goal" to="/goal" />
   </node>
 
