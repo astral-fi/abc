@@ -40,23 +40,20 @@ from matplotlib.lines import Line2D
 import numpy as np
 
 
-# ── Colour palette (dark-mode, perceptually distinct) ────────────────────────
-COLOUR_TEACH  = '#64DFDF'   # teal   — the reference path
-COLOUR_BLIND  = '#FF6B6B'   # coral  — dead-reckoning only (should deviate)
-COLOUR_VISUAL = '#6BCB77'   # green  — visual correction active (should track)
+# ── Colour palette ───────────────────────────────────────────────────────────
+COLOUR_TEACH  = 'blue'      # the reference path
+COLOUR_VISUAL = 'green'     # visual correction active (should track)
 
 ALPHA_PATH    = 0.90
 ALPHA_FILL    = 0.15
 
 PHASE_LABELS = {
     'teach':  'Teach',
-    'blind':  'Repeat - camera covered',
     'visual': 'Repeat - camera active',
 }
 
 PHASE_COLOURS = {
     'teach':  COLOUR_TEACH,
-    'blind':  COLOUR_BLIND,
     'visual': COLOUR_VISUAL,
 }
 
@@ -79,7 +76,7 @@ def _load_csv(path):
     if not os.path.isfile(path):
         return None
 
-    data = {'elapsed_s': [], 'x': [], 'y': [], 'yaw': []}
+    data = {'elapsed_s': [], 'x': [], 'y': [], 'yaw': [], 'ncc_score': []}
     try:
         with open(path, 'r') as fh:
             reader = csv.DictReader(fh)
@@ -89,6 +86,7 @@ def _load_csv(path):
                     data['x'].append(float(row['x']))
                     data['y'].append(float(row['y']))
                     data['yaw'].append(float(row.get('yaw', 0)))
+                    data['ncc_score'].append(float(row.get('ncc_score', float('nan'))))
                 except (KeyError, ValueError):
                     pass
     except Exception as e:
@@ -188,9 +186,9 @@ def _lateral_deviations(ref_x, ref_y, qx, qy):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MARKER_START = dict(marker='o', markersize=10, markeredgewidth=2,
-                     markeredgecolor='white', zorder=6)
+                     markeredgecolor='black', zorder=6)
 _MARKER_END   = dict(marker='s', markersize=10, markeredgewidth=2,
-                     markeredgecolor='white', zorder=6)
+                     markeredgecolor='black', zorder=6)
 
 
 def _draw_path(ax, data, colour, label, lw=2.2):
@@ -205,20 +203,16 @@ def _draw_path(ax, data, colour, label, lw=2.2):
 
 
 def _style_ax(ax, xlabel='', ylabel='', title=''):
-    """Apply consistent dark-mode styling to an axes."""
-    ax.set_facecolor('#1A1A2E')
-    ax.tick_params(colors='#CCCCCC', labelsize=9)
-    for spine in ax.spines.values():
-        spine.set_edgecolor('#444466')
-    ax.grid(True, color='#333355', linewidth=0.6, linestyle='--')
+    """Apply standard styling to an axes."""
+    ax.set_facecolor('white')
+    ax.tick_params(labelsize=9)
+    ax.grid(True, linewidth=0.6, linestyle='--', alpha=0.7)
     if xlabel:
-        ax.set_xlabel(xlabel, color='#AAAACC', fontsize=10)
+        ax.set_xlabel(xlabel, fontsize=10)
     if ylabel:
-        ax.set_ylabel(ylabel, color='#AAAACC', fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=10)
     if title:
-        ax.set_title(title, color='#EEEEFF', fontsize=11, fontweight='bold')
-    ax.xaxis.label.set_color('#AAAACC')
-    ax.yaxis.label.set_color('#AAAACC')
+        ax.set_title(title, fontsize=11, fontweight='bold')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,20 +228,19 @@ def make_plot(phases, out_png=None, show=True):
     show    : bool         — display interactive window
     """
     has_teach  = 'teach'  in phases and phases['teach']  is not None
-    has_blind  = 'blind'  in phases and phases['blind']  is not None
     has_visual = 'visual' in phases and phases['visual'] is not None
 
-    available = [k for k in ('teach', 'blind', 'visual') if phases.get(k) is not None]
+    available = [k for k in ('teach', 'visual') if phases.get(k) is not None]
     if not available:
         sys.exit('ERROR: No valid CSV data to plot.')
 
     # ── Figure layout ─────────────────────────────────────────────────────────
     # Use matplotlib.gridspec.GridSpec — available since matplotlib 1.x.
     # (fig.add_gridspec was only added in 3.1 and is absent on Jetson Nano.)
-    fig = plt.figure(figsize=(14, 13), facecolor='#0D0D1A')
+    fig = plt.figure(figsize=(14, 16), facecolor='white')
     gs  = gridspec.GridSpec(
-        3, 2,
-        height_ratios=[3, 1.4, 1.4],
+        4, 2,
+        height_ratios=[3, 1.4, 1.4, 1.4],
         hspace=0.40,
         wspace=0.28,
         left=0.08, right=0.97, top=0.93, bottom=0.06,
@@ -256,12 +249,13 @@ def make_plot(phases, out_png=None, show=True):
     ax_xy   = fig.add_subplot(gs[0, :])   # top-full: X-Y trajectory
     ax_dist = fig.add_subplot(gs[1, 0])   # bottom-left: cumulative distance
     ax_spd  = fig.add_subplot(gs[1, 1])   # bottom-right: speed profile
-    ax_dev  = fig.add_subplot(gs[2, :])   # very bottom-full: lateral deviation
+    ax_dev  = fig.add_subplot(gs[2, :])   # bottom-full: lateral deviation
+    ax_ncc  = fig.add_subplot(gs[3, :])   # very bottom-full: NCC score
 
     # ── Title ─────────────────────────────────────────────────────────────────
     fig.suptitle(
-        'JetRacer Odometry - 3-Phase Comparison',
-        color='#E0E0FF', fontsize=16, fontweight='bold', y=0.97)
+        'JetRacer Odometry - 2-Phase Comparison',
+        color='black', fontsize=16, fontweight='bold', y=0.97)
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 1: X-Y Trajectory
@@ -273,10 +267,6 @@ def make_plot(phases, out_png=None, show=True):
         d = phases['teach']
         _draw_path(ax_xy, d, COLOUR_TEACH, PHASE_LABELS['teach'], lw=2.0)
 
-    if has_blind:
-        d = phases['blind']
-        _draw_path(ax_xy, d, COLOUR_BLIND, PHASE_LABELS['blind'], lw=2.0)
-
     if has_visual:
         d = phases['visual']
         _draw_path(ax_xy, d, COLOUR_VISUAL, PHASE_LABELS['visual'], lw=2.0)
@@ -286,22 +276,19 @@ def make_plot(phases, out_png=None, show=True):
     # Build combined legend with path lines + start/end markers.
     # Avoid labelcolor= — added in matplotlib 3.2, absent on Jetson.
     legend_markers = [
-        Line2D([0], [0], marker='o', color='white', label='Start',
+        Line2D([0], [0], marker='o', color='black', label='Start',
                markersize=8, linestyle='None',
-               markeredgewidth=1.5, markeredgecolor='white'),
-        Line2D([0], [0], marker='s', color='white', label='End',
+               markeredgewidth=1.5, markeredgecolor='black'),
+        Line2D([0], [0], marker='s', color='black', label='End',
                markersize=8, linestyle='None',
-               markeredgewidth=1.5, markeredgecolor='white'),
+               markeredgewidth=1.5, markeredgecolor='black'),
     ]
     handles, labels = ax_xy.get_legend_handles_labels()
-    leg = ax_xy.legend(
+    ax_xy.legend(
         handles=handles + legend_markers,
         labels=labels + ['Start', 'End'],
-        loc='upper left', framealpha=0.25, fontsize=9,
-        facecolor='#222244', edgecolor='#444466',
+        loc='upper left', framealpha=0.8, fontsize=9,
     )
-    for text in leg.get_texts():
-        text.set_color('white')
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 2: Cumulative distance vs elapsed time
@@ -318,10 +305,7 @@ def make_plot(phases, out_png=None, show=True):
                      linewidth=1.8,
                      label=PHASE_LABELS[name])
 
-    leg = ax_dist.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                         facecolor='#222244', edgecolor='#444466')
-    for text in leg.get_texts():
-        text.set_color('white')
+    ax_dist.legend(loc='upper left', framealpha=0.8, fontsize=8)
 
     # ═════════════════════════════════════════════════════════════════════════
     # Panel 3: Forward speed profile
@@ -340,10 +324,7 @@ def make_plot(phases, out_png=None, show=True):
                     alpha=0.85,
                     label=PHASE_LABELS[name])
 
-    leg = ax_spd.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                        facecolor='#222244', edgecolor='#444466')
-    for text in leg.get_texts():
-        text.set_color('white')
+    ax_spd.legend(loc='upper left', framealpha=0.8, fontsize=8)
     ax_spd.set_ylim(bottom=0.0)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -360,7 +341,7 @@ def make_plot(phases, out_png=None, show=True):
         teach = phases['teach']
         ref_x, ref_y = teach['x'], teach['y']
 
-        for name in ('blind', 'visual'):
+        for name in ('visual',):
             if not phases.get(name):
                 continue
             d = phases[name]
@@ -384,26 +365,48 @@ def make_plot(phases, out_png=None, show=True):
                 color=c, fontsize=8, style='italic',
             )
 
-        leg = ax_dev.legend(loc='upper left', framealpha=0.20, fontsize=8,
-                            facecolor='#222244', edgecolor='#444466')
-        for text in leg.get_texts():
-            text.set_color('white')
+        ax_dev.legend(loc='upper left', framealpha=0.8, fontsize=8)
         ax_dev.set_ylim(bottom=0.0)
     else:
         ax_dev.text(0.5, 0.5,
                     'Teach CSV required to compute deviation',
                     ha='center', va='center', transform=ax_dev.transAxes,
-                    color='#888899', fontsize=11)
+                    color='black', fontsize=11)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # Panel 5: NCC Score
+    # ═════════════════════════════════════════════════════════════════════════
+    _style_ax(ax_ncc, xlabel='Cumulative distance along own path  (m)',
+              ylabel='NCC Score',
+              title='Normalized Cross-Correlation Score')
+
+    ax_ncc.axhline(0.02, color='red', linewidth=0.8, linestyle='--', alpha=0.6, label='Threshold (0.02)')
+
+    for name in ('teach', 'visual'):
+        if not phases.get(name):
+            continue
+        d = phases[name]
+        if 'ncc_score' in d and not np.all(np.isnan(d['ncc_score'])):
+            cum_d = _cumulative_distance(d['x'], d['y'])
+            c     = PHASE_COLOURS[name]
+            ax_ncc.plot(cum_d, d['ncc_score'],
+                        color=c,
+                        linewidth=1.6,
+                        alpha=0.85,
+                        label=PHASE_LABELS[name])
+            
+    ax_ncc.legend(loc='upper right', framealpha=0.8, fontsize=8)
+    ax_ncc.set_ylim(-0.1, 1.05)
 
     # ── Watermark summarising files ───────────────────────────────────────────
     label_parts = []
-    for name in ('teach', 'blind', 'visual'):
+    for name in ('teach', 'visual'):
         if phases.get(name) is not None:
             n = len(phases[name]['x'])
             label_parts.append('%s (%d pts)' % (PHASE_LABELS[name], n))
     fig.text(0.98, 0.005,
              '  |  '.join(label_parts),
-             ha='right', va='bottom', color='#555577', fontsize=7)
+             ha='right', va='bottom', color='black', fontsize=7)
 
     # ── Save / show ───────────────────────────────────────────────────────────
     if out_png:
@@ -434,11 +437,10 @@ def _build_parser():
     )
     p.add_argument(
         '--dir', default=None,
-        help='Directory containing teach.csv, blind.csv, visual.csv. '
-             'Takes precedence over individual --teach/--blind/--visual flags.',
+        help='Directory containing teach.csv, visual.csv. '
+             'Takes precedence over individual --teach/--visual flags.',
     )
     p.add_argument('--teach',  default=None, help='Path to teach CSV.')
-    p.add_argument('--blind',  default=None, help='Path to blind-repeat CSV.')
     p.add_argument('--visual', default=None, help='Path to visual-repeat CSV.')
     p.add_argument(
         '--out', default=None,
@@ -456,7 +458,6 @@ if __name__ == '__main__':
 
     # Resolve CSV paths
     teach_csv  = args.teach
-    blind_csv  = args.blind
     visual_csv = args.visual
     out_png    = args.out
 
@@ -464,8 +465,6 @@ if __name__ == '__main__':
         d = os.path.expanduser(args.dir)
         if not teach_csv:
             teach_csv  = os.path.join(d, 'teach.csv')
-        if not blind_csv:
-            blind_csv  = os.path.join(d, 'blind.csv')
         if not visual_csv:
             visual_csv = os.path.join(d, 'visual.csv')
         if not out_png:
@@ -477,15 +476,14 @@ if __name__ == '__main__':
     # Load
     phases = {
         'teach':  _load_csv(teach_csv)  if teach_csv  else None,
-        'blind':  _load_csv(blind_csv)  if blind_csv  else None,
         'visual': _load_csv(visual_csv) if visual_csv else None,
     }
 
     found = [k for k, v in phases.items() if v is not None]
     if not found:
         sys.exit('ERROR: No CSV files found. Check paths:\n'
-                 '  teach  = %s\n  blind  = %s\n  visual = %s'
-                 % (teach_csv, blind_csv, visual_csv))
+                 '  teach  = %s\n  visual = %s'
+                 % (teach_csv, visual_csv))
 
     missing = [k for k, v in phases.items() if v is None]
     if missing:

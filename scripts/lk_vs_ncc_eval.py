@@ -103,6 +103,20 @@ def _ncc_offset(teach_desc, query_desc):
     return float(shift[0])
 
 
+def _ncc_score(teach_desc, query_desc):
+    """
+    Normalized cross-correlation score (reproduces _corr).
+    """
+    av = teach_desc.ravel()
+    bv = query_desc.ravel()
+    am = av - np.mean(av)
+    bm = bv - np.mean(bv)
+    denom = (np.linalg.norm(am) * np.linalg.norm(bm))
+    if denom < 1e-12:
+        return -1.0
+    return float(np.dot(am, bm) / denom)
+
+
 # ---------------------------------------------------------------------------
 # File discovery helpers
 # ---------------------------------------------------------------------------
@@ -263,13 +277,16 @@ def run_evaluation(run_dir, gt_csv=None, out_csv='lk_vs_ncc_results.csv',
             'lk_offset_px':   None,
             'ncc_offset_px':  None,
             'lk_confidence':  None,
+            'ncc_score':      None,
             'lateral_error_m': _nearest_gt(gt_rows, frame['timestamp']),
         }
 
         if prev_frame is not None:
             # ---- NCC (phase correlate) offset ----
             ncc_dx = _ncc_offset(prev_frame['desc'], frame['desc'])
+            ncc_score = _ncc_score(prev_frame['desc'], frame['desc'])
             row['ncc_offset_px'] = ncc_dx
+            row['ncc_score'] = ncc_score
 
             # ---- LK (ORB match) offset + rotation ----
             # match_to_keyframe now returns (offset_px, rotation_rad, confidence)
@@ -298,7 +315,7 @@ def run_evaluation(run_dir, gt_csv=None, out_csv='lk_vs_ncc_results.csv',
     fieldnames = [
         'frame_idx', 'timestamp',
         'lk_offset_px', 'ncc_offset_px',
-        'lk_confidence', 'lateral_error_m',
+        'lk_confidence', 'ncc_score', 'lateral_error_m',
     ]
 
     out_path = out_csv
@@ -344,6 +361,8 @@ def _plot_results(results, gt_rows):
                 for r in results]
     conf_vals = [r['lk_confidence'] if r['lk_confidence'] is not None else float('nan')
                  for r in results]
+    ncc_score_vals = [r['ncc_score'] if r['ncc_score'] is not None else float('nan')
+                 for r in results]
     gt_vals = [r['lateral_error_m'] if r['lateral_error_m'] is not None else float('nan')
                for r in results]
 
@@ -363,13 +382,17 @@ def _plot_results(results, gt_rows):
     axes[0].grid(True, alpha=0.3)
     axes[0].axhline(0, color='black', linewidth=0.5)
 
-    # --- Panel 2: LK confidence ---
-    axes[1].fill_between(frame_ids, conf_vals, alpha=0.4, color='darkorange')
-    axes[1].plot(frame_ids, conf_vals, color='darkorange', linewidth=1.0)
+    # --- Panel 2: LK confidence vs NCC score ---
+    axes[1].fill_between(frame_ids, conf_vals, alpha=0.3, color='darkorange')
+    axes[1].plot(frame_ids, conf_vals, color='darkorange', linewidth=1.0, label='LK Confidence')
+    axes[1].plot(frame_ids, ncc_score_vals, color='steelblue', linewidth=1.0, label='NCC Score')
     axes[1].axhline(0.4, color='red', linewidth=0.8, linestyle='--',
-                    label='fallback threshold (0.4)')
-    axes[1].set_ylabel('LK confidence')
-    axes[1].set_ylim(-0.05, 1.05)
+                    label='LK fallback threshold (0.4)')
+    axes[1].axhline(0.02, color='red', linewidth=0.8, linestyle=':',
+                    label='NCC threshold (0.02)')
+    axes[1].set_ylabel('Score / Confidence')
+    axes[1].set_title('Matching Confidence & Correlation Score')
+    axes[1].set_ylim(-0.1, 1.05)
     axes[1].legend(loc='upper right')
     axes[1].grid(True, alpha=0.3)
 

@@ -35,15 +35,17 @@ Python 2/3 dual-compatible.
 from __future__ import division, print_function
 
 import csv
+import json
 import os
 import sys
 
 import rospy
 import tf.transformations as tft
 from geometry_msgs.msg import PoseWithCovarianceStamped
+from std_msgs.msg import String
 
 
-VALID_PHASES = ('teach', 'blind', 'visual')
+VALID_PHASES = ('teach', 'visual')
 
 
 class OdomPhaseRecorder(object):
@@ -60,6 +62,7 @@ class OdomPhaseRecorder(object):
         out_dir      = os.path.expanduser(
             rospy.get_param('~out_dir',  '~/jetracer/analysis'))
         odom_topic   = rospy.get_param('~odom_topic',  '/odom_combined')
+        debug_topic  = rospy.get_param('~debug_topic', '/teach_repeat/correction_debug')
         # Session tag added to CSV name so multiple runs don't overwrite each other
         session      = rospy.get_param('~session',     '')
 
@@ -82,15 +85,18 @@ class OdomPhaseRecorder(object):
 
         self._fh     = open(out_path, 'w')
         self._writer = csv.writer(self._fh, lineterminator='\n')
-        self._writer.writerow(['elapsed_s', 'x', 'y', 'yaw'])
+        self._writer.writerow(['elapsed_s', 'x', 'y', 'yaw', 'ncc_score'])
 
         self._count = 0
         self._t0    = None
         self._out_path = out_path
+        self._last_ncc = float('nan')
 
         # ── ROS plumbing ──────────────────────────────────────────────────────
         rospy.Subscriber(odom_topic, PoseWithCovarianceStamped,
                          self._odom_cb, queue_size=20)
+        rospy.Subscriber(debug_topic, String,
+                         self._debug_cb, queue_size=20)
 
         rospy.on_shutdown(self._on_shutdown)
 
@@ -106,6 +112,13 @@ class OdomPhaseRecorder(object):
             '[odom_phase_recorder] Press Ctrl-C to stop and save.')
 
     # ── Callback ──────────────────────────────────────────────────────────────
+
+    def _debug_cb(self, msg):
+        try:
+            data = json.loads(msg.data)
+            self._last_ncc = float(data.get('ncc_score', float('nan')))
+        except Exception:
+            pass
 
     def _odom_cb(self, msg):
         # PoseWithCovarianceStamped has only pose, no twist field.
@@ -124,6 +137,7 @@ class OdomPhaseRecorder(object):
             round(x,   5),
             round(y,   5),
             round(yaw, 6),
+            self._last_ncc,
         ])
         self._count += 1
 

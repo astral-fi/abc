@@ -105,10 +105,10 @@
         as the primary correction with NCC as fallback.
         Set to false (current) to run PURE NCC-only mode for comparison / testing.
     -->
-    <param name="~use_lk_hybrid" value="false" />
+    <param name="~use_lk_hybrid" value="true" />
 
     <!--
-      LK hybrid params (only active when use_lk_hybrid=true above)
+      LK hybrid params (only active when use_lk_hybrid=true abosve)
       lk_confidence_threshold: lowered from 0.40 → 0.20 because at full
         resolution with 200 ORB features the partial-affine inlier ratio is
         typically 0.20–0.50 on textured indoor scenes.
